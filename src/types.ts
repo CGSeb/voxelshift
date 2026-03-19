@@ -1,4 +1,5 @@
 export type VersionSource = "discovered" | "manual";
+export type ReleaseInstallPhase = "starting" | "downloading" | "extracting" | "canceling" | "completed" | "failed" | "canceled";
 
 export interface BlenderVersion {
   id: string;
@@ -30,4 +31,15 @@ export interface BlenderReleaseDownload {
 export interface BlenderReleaseListing {
   platformLabel: string;
   downloads: BlenderReleaseDownload[];
+}
+
+export interface BlenderReleaseInstallProgress {
+  releaseId: string;
+  phase: ReleaseInstallPhase;
+  progressPercent: number | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  speedBytesPerSecond: number | null;
+  installDir: string | null;
+  message: string;
 }

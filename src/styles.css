@@ -276,6 +276,18 @@ p {
   color: var(--text-strong);
 }
 
+.card-action-danger {
+  background: rgba(255, 110, 110, 0.16);
+  border-color: rgba(255, 110, 110, 0.3);
+  color: #ffd7d7;
+}
+
+.card-action-danger:hover,
+.card-action-danger:focus-visible {
+  background: rgba(255, 110, 110, 0.22);
+  border-color: rgba(255, 141, 141, 0.38);
+}
+
 .card-action-link {
   display: inline-flex;
   align-items: center;
@@ -289,7 +301,50 @@ p {
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
 }
 
-.favorite-card,
+.card-action-installed {
+  position: relative;
+  min-width: 7.25rem;
+  overflow: hidden;
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.card-action-installed:hover,
+.card-action-installed:focus-visible {
+  transform: translateY(-1px);
+  background: rgba(190, 50, 50, 0.18);
+  border-color: rgba(255, 110, 110, 0.36);
+  color: #ffd5d5;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.22);
+}
+
+.card-action-installed-default,
+.card-action-installed-hover {
+  display: inline-block;
+}
+
+.card-action-installed-hover {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -42%);
+  opacity: 0;
+}
+
+.card-action-installed:hover .card-action-installed-default,
+.card-action-installed:focus-visible .card-action-installed-default {
+  opacity: 0;
+}
+
+.card-action-installed:hover .card-action-installed-hover,
+.card-action-installed:focus-visible .card-action-installed-hover {
+  opacity: 1;
+  transform: translate(-50%, -50%);
+}
+
 .release-state,
 .release-hero,
 .release-list {
@@ -494,6 +549,62 @@ p {
   transform: translateX(-50%) translateY(0);
 }
 
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 3, 3, 0.72);
+  backdrop-filter: blur(12px);
+}
+
+.confirm-dialog {
+  width: min(480px, 100%);
+  border: 1px solid rgba(255, 110, 110, 0.16);
+  border-radius: 22px;
+  padding: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 45%),
+    linear-gradient(180deg, rgba(255, 110, 110, 0.08), transparent 120%),
+    #141414;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.42);
+}
+
+.confirm-dialog-copy {
+  display: grid;
+  gap: 12px;
+}
+
+.confirm-dialog-copy h2 {
+  color: var(--text-strong);
+  font-size: 1.35rem;
+  letter-spacing: -0.03em;
+}
+
+.confirm-dialog-description {
+  display: grid;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.confirm-dialog-error {
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  background: rgba(255, 110, 110, 0.12);
+  color: #ffb3b3;
+  font-size: 0.9rem;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 900px) {
   .app-topbar,
   .release-hero {
@@ -569,5 +680,109 @@ p {
 
 
 
+
+
+
+.card-action:disabled {
+  cursor: default;
+  opacity: 0.58;
+  transform: none;
+  box-shadow: none;
+}
+
+.release-row-item {
+  align-items: start;
+}
+
+.release-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.release-primary-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.release-installed-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.3rem 0.66rem;
+  background: rgba(112, 199, 114, 0.16);
+  color: #b9f0bb;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.release-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.release-install-status {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.release-install-copy {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.release-install-title {
+  color: var(--text-strong);
+  font-size: 0.92rem;
+}
+
+.release-install-meta {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.release-progress-track {
+  position: relative;
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.release-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #f59b32 0%, #ffd25f 100%);
+}
+
+.release-progress-track-indeterminate .release-progress-fill {
+  width: 32%;
+  animation: release-progress-slide 1.15s ease-in-out infinite;
+}
+
+.release-install-status-failed .release-progress-fill {
+  background: linear-gradient(90deg, #ff7575 0%, #ff9a9a 100%);
+}
+
+.release-install-status-completed .release-progress-fill {
+  background: linear-gradient(90deg, #63d471 0%, #a6f08c 100%);
+}
+
+@keyframes release-progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
 
 

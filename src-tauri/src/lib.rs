@@ -1,16 +1,25 @@
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager};
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
 const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
 const BLENDER_RELEASE_INDEX_URL: &str = "https://download.blender.org/release/";
+const RELEASE_INSTALL_EVENT: &str = "release-install-progress";
+const VOXELSHIFT_DIR_NAME: &str = "VoxelShift";
+const STABLE_INSTALL_DIR_NAME: &str = "stable";
+const TEMP_INSTALL_DIR_NAME: &str = ".tmp";
+const DOWNLOAD_PROGRESS_WEIGHT: f64 = 95.0;
+const INSTALL_CANCELED_MESSAGE: &str = "Installation canceled.";
 const MAX_SCAN_DEPTH: usize = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,7 +64,7 @@ struct BlenderReleaseChannel {
     url: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BlenderReleaseDownload {
     id: String,
@@ -105,8 +114,92 @@ struct LaunchRequest {
     extra_args: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallReleaseRequest {
+    id: String,
+    version: String,
+    file_name: String,
+    url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleaseInstallProgress {
+    release_id: String,
+    phase: String,
+    progress_percent: Option<f64>,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    speed_bytes_per_second: Option<f64>,
+    install_dir: Option<String>,
+    message: String,
+}
+
+#[derive(Clone, Default)]
+struct ReleaseInstallControl {
+    active_ids: Arc<Mutex<HashSet<String>>>,
+    canceled_ids: Arc<Mutex<HashSet<String>>>,
+}
+
+impl ReleaseInstallControl {
+    fn begin(&self, release_id: &str) -> Result<(), String> {
+        let mut active_ids = self
+            .active_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?;
+        if active_ids.contains(release_id) {
+            return Err("That release is already being installed.".to_string());
+        }
+        active_ids.insert(release_id.to_string());
+        drop(active_ids);
+        self.canceled_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?
+            .remove(release_id);
+        Ok(())
+    }
+
+    fn request_cancel(&self, release_id: &str) -> Result<bool, String> {
+        let is_active = self
+            .active_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?
+            .contains(release_id);
+        if !is_active {
+            return Ok(false);
+        }
+        self.canceled_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?
+            .insert(release_id.to_string());
+        Ok(true)
+    }
+
+    fn is_cancel_requested(&self, release_id: &str) -> Result<bool, String> {
+        Ok(self
+            .canceled_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?
+            .contains(release_id))
+    }
+
+    fn finish(&self, release_id: &str) -> Result<(), String> {
+        self.active_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?
+            .remove(release_id);
+        self.canceled_ids
+            .lock()
+            .map_err(|_| "Unable to access install state.".to_string())?
+            .remove(release_id);
+        Ok(())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .manage(ReleaseInstallControl::default())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -127,7 +220,9 @@ pub fn run() {
             remove_scan_root,
             launch_blender,
             open_version_location,
-            get_blender_release_downloads
+            get_blender_release_downloads,
+            install_blender_release,
+            cancel_blender_release_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running Voxel Shift");
@@ -190,6 +285,165 @@ async fn get_blender_release_downloads() -> Result<BlenderReleaseListing, String
 }
 
 #[tauri::command]
+async fn install_blender_release(
+    app: AppHandle,
+    control: tauri::State<'_, ReleaseInstallControl>,
+    request: InstallReleaseRequest,
+) -> Result<LauncherState, String> {
+    validate_install_request(&request)?;
+
+    let existing_state = build_launcher_state(&app)?;
+    if existing_state
+        .versions
+        .iter()
+        .any(|version| version.available && version.version.as_deref() == Some(request.version.as_str()))
+    {
+        return Err(format!("Blender {} is already installed.", request.version));
+    }
+
+    control.begin(&request.id)?;
+
+    let install_result = async {
+        let stable_dir = stable_install_dir(&app)?;
+        let temp_dir = temp_install_root(&app)?.join(&request.id);
+
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir)
+                .map_err(|error| format!("Unable to clear a previous install attempt: {error}"))?;
+        }
+
+        fs::create_dir_all(&stable_dir)
+            .map_err(|error| format!("Unable to prepare the stable install directory: {error}"))?;
+        fs::create_dir_all(&temp_dir)
+            .map_err(|error| format!("Unable to prepare the temporary install directory: {error}"))?;
+
+        let archive_path = temp_dir.join(&request.file_name);
+
+        emit_release_install_progress(
+            &app,
+            ReleaseInstallProgress {
+                release_id: request.id.clone(),
+                phase: "starting".to_string(),
+                progress_percent: Some(0.0),
+                downloaded_bytes: 0,
+                total_bytes: None,
+                speed_bytes_per_second: None,
+                install_dir: None,
+                message: format!("Preparing Blender {} for install", request.version),
+            },
+        );
+
+        if let Err(error) = download_release_archive(&app, control.inner(), &request, &archive_path).await {
+            let _ = fs::remove_dir_all(&temp_dir);
+            let phase = if error == INSTALL_CANCELED_MESSAGE {
+                "canceled"
+            } else {
+                "failed"
+            };
+            emit_release_install_progress(
+                &app,
+                ReleaseInstallProgress {
+                    release_id: request.id.clone(),
+                    phase: phase.to_string(),
+                    progress_percent: None,
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                    speed_bytes_per_second: None,
+                    install_dir: None,
+                    message: error.clone(),
+                },
+            );
+            return Err(error);
+        }
+
+        let final_install_dir = match extract_release_archive(
+            &app,
+            control.inner().clone(),
+            &request,
+            &archive_path,
+            &stable_dir,
+            &temp_dir,
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&temp_dir);
+                let phase = if error == INSTALL_CANCELED_MESSAGE {
+                    "canceled"
+                } else {
+                    "failed"
+                };
+                emit_release_install_progress(
+                    &app,
+                    ReleaseInstallProgress {
+                        release_id: request.id.clone(),
+                        phase: phase.to_string(),
+                        progress_percent: None,
+                        downloaded_bytes: 0,
+                        total_bytes: None,
+                        speed_bytes_per_second: None,
+                        install_dir: None,
+                        message: error.clone(),
+                    },
+                );
+                return Err(error);
+            }
+        };
+
+        let _ = fs::remove_file(&archive_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let launcher_state = build_launcher_state(&app)?;
+
+        emit_release_install_progress(
+            &app,
+            ReleaseInstallProgress {
+                release_id: request.id.clone(),
+                phase: "completed".to_string(),
+                progress_percent: Some(100.0),
+                downloaded_bytes: 0,
+                total_bytes: None,
+                speed_bytes_per_second: None,
+                install_dir: Some(path_to_string(&final_install_dir)),
+                message: format!("Blender {} is ready to launch.", request.version),
+            },
+        );
+
+        Ok(launcher_state)
+    }
+    .await;
+
+    let _ = control.finish(&request.id);
+    install_result
+}
+
+#[tauri::command]
+fn cancel_blender_release_install(
+    app: AppHandle,
+    control: tauri::State<'_, ReleaseInstallControl>,
+    id: String,
+) -> Result<(), String> {
+    if control.request_cancel(&id)? {
+        emit_release_install_progress(
+            &app,
+            ReleaseInstallProgress {
+                release_id: id,
+                phase: "canceling".to_string(),
+                progress_percent: None,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                speed_bytes_per_second: None,
+                install_dir: None,
+                message: "Canceling installation...".to_string(),
+            },
+        );
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn register_blender_version(
     app: AppHandle,
     request: RegisterRequest,
@@ -223,6 +477,16 @@ fn register_blender_version(
 
 #[tauri::command]
 fn remove_blender_version(app: AppHandle, id: String) -> Result<LauncherState, String> {
+    let state = build_launcher_state(&app)?;
+    let version = state
+        .versions
+        .iter()
+        .find(|version| version.id == id)
+        .cloned()
+        .ok_or_else(|| "That Blender version is no longer available.".to_string())?;
+
+    remove_managed_install_dir(&app, &version)?;
+
     let mut stored = load_stored_state(&app)?;
     stored.tracked_versions.retain(|tracked| tracked.id != id);
 
@@ -343,7 +607,7 @@ fn open_version_location(app: AppHandle, id: String) -> Result<(), String> {
 
 fn build_launcher_state(app: &AppHandle) -> Result<LauncherState, String> {
     let stored = load_stored_state(app)?;
-    let discovered = discover_versions(&stored.scan_roots);
+    let discovered = discover_versions(app, &stored.scan_roots);
     let mut merged = BTreeMap::<String, BlenderVersion>::new();
 
     for version in discovered {
@@ -408,8 +672,8 @@ fn build_launcher_state(app: &AppHandle) -> Result<LauncherState, String> {
     })
 }
 
-fn discover_versions(scan_roots: &[String]) -> Vec<BlenderVersion> {
-    let mut roots = default_scan_roots();
+fn discover_versions(app: &AppHandle, scan_roots: &[String]) -> Vec<BlenderVersion> {
+    let mut roots = default_scan_roots(app);
 
     for root in scan_roots {
         let custom_root = PathBuf::from(root);
@@ -807,6 +1071,333 @@ fn extract_version_like_segment(value: &str) -> Option<String> {
     }
 }
 
+fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), String> {
+    let platform = current_release_platform().ok_or_else(|| {
+        format!(
+            "This platform is not supported for automatic installs: {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+
+    if request.url.trim().is_empty() {
+        return Err("The release download URL is missing.".to_string());
+    }
+
+    if request.file_name.trim().is_empty() {
+        return Err("The release file name is missing.".to_string());
+    }
+
+    if !request.url.starts_with(BLENDER_RELEASE_INDEX_URL) {
+        return Err("Only official Blender release downloads can be installed automatically.".to_string());
+    }
+
+    if !request.file_name.ends_with(platform.file_suffix) {
+        return Err(format!(
+            "This release does not match the current platform: {}.",
+            platform.label
+        ));
+    }
+
+    if !request.file_name.ends_with(".zip") {
+        return Err("Automatic installs currently support zip-based Blender releases only.".to_string());
+    }
+
+    Ok(())
+}
+
+async fn download_release_archive(
+    app: &AppHandle,
+    control: &ReleaseInstallControl,
+    request: &InstallReleaseRequest,
+    archive_path: &Path,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(request.url.trim())
+        .send()
+        .await
+        .map_err(|error| format!("Could not start the Blender download: {error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "The Blender download returned an unexpected status: {status}"
+        ));
+    }
+
+    let total_bytes = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut file = fs::File::create(archive_path)
+        .map_err(|error| format!("Unable to create the temporary download file: {error}"))?;
+    let started_at = Instant::now();
+    let mut last_emit = Instant::now() - Duration::from_millis(250);
+    let mut downloaded_bytes = 0_u64;
+
+    emit_release_install_progress(
+        app,
+        ReleaseInstallProgress {
+            release_id: request.id.clone(),
+            phase: "downloading".to_string(),
+            progress_percent: Some(0.0),
+            downloaded_bytes: 0,
+            total_bytes,
+            speed_bytes_per_second: Some(0.0),
+            install_dir: None,
+            message: format!("Downloading {}", request.file_name),
+        },
+    );
+
+    while let Some(chunk_result) = stream.next().await {
+        if control.is_cancel_requested(&request.id)? {
+            return Err(INSTALL_CANCELED_MESSAGE.to_string());
+        }
+
+        let chunk = chunk_result
+            .map_err(|error| format!("The Blender download was interrupted: {error}"))?;
+
+        file.write_all(&chunk)
+            .map_err(|error| format!("Unable to write the Blender download to disk: {error}"))?;
+
+        downloaded_bytes += chunk.len() as u64;
+
+        if last_emit.elapsed() >= Duration::from_millis(180) {
+            let elapsed_seconds = started_at.elapsed().as_secs_f64().max(0.001);
+            let speed_bytes_per_second = downloaded_bytes as f64 / elapsed_seconds;
+            let progress_percent = total_bytes.map(|total| {
+                ((downloaded_bytes as f64 / total as f64).clamp(0.0, 1.0)) * DOWNLOAD_PROGRESS_WEIGHT
+            });
+
+            emit_release_install_progress(
+                app,
+                ReleaseInstallProgress {
+                    release_id: request.id.clone(),
+                    phase: "downloading".to_string(),
+                    progress_percent,
+                    downloaded_bytes,
+                    total_bytes,
+                    speed_bytes_per_second: Some(speed_bytes_per_second),
+                    install_dir: None,
+                    message: format!("Downloading {}", request.file_name),
+                },
+            );
+
+            last_emit = Instant::now();
+        }
+    }
+
+    file.flush()
+        .map_err(|error| format!("Unable to finalize the downloaded archive: {error}"))?;
+
+    if control.is_cancel_requested(&request.id)? {
+        return Err(INSTALL_CANCELED_MESSAGE.to_string());
+    }
+
+    let elapsed_seconds = started_at.elapsed().as_secs_f64().max(0.001);
+    emit_release_install_progress(
+        app,
+        ReleaseInstallProgress {
+            release_id: request.id.clone(),
+            phase: "downloading".to_string(),
+            progress_percent: Some(DOWNLOAD_PROGRESS_WEIGHT),
+            downloaded_bytes,
+            total_bytes,
+            speed_bytes_per_second: Some(downloaded_bytes as f64 / elapsed_seconds),
+            install_dir: None,
+            message: format!("Download finished for {}", request.file_name),
+        },
+    );
+
+    Ok(())
+}
+
+async fn extract_release_archive(
+    app: &AppHandle,
+    control: ReleaseInstallControl,
+    request: &InstallReleaseRequest,
+    archive_path: &Path,
+    stable_dir: &Path,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    let app = app.clone();
+    let control = control.clone();
+    let request = request.clone();
+    let archive_path = archive_path.to_path_buf();
+    let stable_dir = stable_dir.to_path_buf();
+    let temp_dir = temp_dir.to_path_buf();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let extraction_dir = temp_dir.join("extract");
+        if extraction_dir.exists() {
+            fs::remove_dir_all(&extraction_dir)
+                .map_err(|error| format!("Unable to clear the extraction folder: {error}"))?;
+        }
+
+        fs::create_dir_all(&extraction_dir)
+            .map_err(|error| format!("Unable to create the extraction folder: {error}"))?;
+
+        let archive_file = fs::File::open(&archive_path)
+            .map_err(|error| format!("Unable to open the downloaded Blender archive: {error}"))?;
+        let mut archive = zip::ZipArchive::new(archive_file)
+            .map_err(|error| format!("Unable to read the downloaded Blender archive: {error}"))?;
+        let total_entries = archive.len().max(1);
+
+        for index in 0..archive.len() {
+            if control.is_cancel_requested(&request.id)? {
+                return Err(INSTALL_CANCELED_MESSAGE.to_string());
+            }
+
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| format!("Unable to read an archive entry: {error}"))?;
+            let relative_path = entry.enclosed_name().map(Path::to_path_buf).ok_or_else(|| {
+                format!("The archive entry '{}' has an invalid path.", entry.name())
+            })?;
+            let output_path = extraction_dir.join(relative_path);
+
+            if entry.is_dir() {
+                fs::create_dir_all(&output_path)
+                    .map_err(|error| format!("Unable to create an extracted folder: {error}"))?;
+            } else {
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| format!("Unable to prepare an extracted folder: {error}"))?;
+                }
+
+                let mut output = fs::File::create(&output_path)
+                    .map_err(|error| format!("Unable to create an extracted file: {error}"))?;
+                std::io::copy(&mut entry, &mut output)
+                    .map_err(|error| format!("Unable to extract a Blender file: {error}"))?;
+            }
+
+            let extract_ratio = (index + 1) as f64 / total_entries as f64;
+            emit_release_install_progress(
+                &app,
+                ReleaseInstallProgress {
+                    release_id: request.id.clone(),
+                    phase: "extracting".to_string(),
+                    progress_percent: Some(
+                        DOWNLOAD_PROGRESS_WEIGHT
+                            + extract_ratio * (100.0 - DOWNLOAD_PROGRESS_WEIGHT),
+                    ),
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                    speed_bytes_per_second: None,
+                    install_dir: None,
+                    message: format!("Extracting {}", request.file_name),
+                },
+            );
+        }
+
+        if control.is_cancel_requested(&request.id)? {
+            return Err(INSTALL_CANCELED_MESSAGE.to_string());
+        }
+
+        finalize_extracted_release(&request, &extraction_dir, &stable_dir)
+    })
+    .await
+    .map_err(|error| format!("Failed to finish the Blender install: {error}"))?
+}
+fn finalize_extracted_release(
+    request: &InstallReleaseRequest,
+    extraction_dir: &Path,
+    stable_dir: &Path,
+) -> Result<PathBuf, String> {
+    let mut top_level_entries = fs::read_dir(extraction_dir)
+        .map_err(|error| format!("Unable to read the extracted files: {error}"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+
+    top_level_entries.sort();
+
+    let archive_root = if top_level_entries.len() == 1 && top_level_entries[0].is_dir() {
+        top_level_entries.remove(0)
+    } else {
+        extraction_dir.to_path_buf()
+    };
+
+    let final_dir_name = archive_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| release_folder_name(&request.file_name));
+    let final_install_dir = stable_dir.join(final_dir_name);
+
+    if final_install_dir.exists() {
+        return Err(format!(
+            "The install folder already exists: {}",
+            path_to_string(&final_install_dir)
+        ));
+    }
+
+    if archive_root == extraction_dir {
+        fs::rename(extraction_dir, &final_install_dir)
+            .map_err(|error| format!("Unable to move the installed Blender files into place: {error}"))?;
+    } else {
+        fs::rename(&archive_root, &final_install_dir)
+            .map_err(|error| format!("Unable to move the installed Blender folder into place: {error}"))?;
+    }
+
+    let executable = scan_for_blender_executables(&final_install_dir, MAX_SCAN_DEPTH)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "The downloaded archive did not contain blender.exe.".to_string())?;
+
+    if !executable.exists() {
+        return Err("The extracted Blender executable could not be found.".to_string());
+    }
+
+    Ok(final_install_dir)
+}
+
+fn emit_release_install_progress(app: &AppHandle, progress: ReleaseInstallProgress) {
+    let _ = app.emit(RELEASE_INSTALL_EVENT, progress);
+}
+
+fn release_folder_name(file_name: &str) -> String {
+    file_name.trim_end_matches(".zip").trim().to_string()
+}
+
+fn voxelshift_documents_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let documents_dir = app
+        .path()
+        .document_dir()
+        .map_err(|error| format!("Unable to find the Documents directory: {error}"))?;
+
+    Ok(documents_dir.join(VOXELSHIFT_DIR_NAME))
+}
+
+fn stable_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(voxelshift_documents_dir(app)?.join(STABLE_INSTALL_DIR_NAME))
+}
+
+fn remove_managed_install_dir(app: &AppHandle, version: &BlenderVersion) -> Result<(), String> {
+    let stable_dir = stable_install_dir(app)?;
+    let install_dir = PathBuf::from(&version.install_dir);
+
+    if install_dir == stable_dir || !install_dir.starts_with(&stable_dir) || !install_dir.exists() {
+        return Ok(());
+    }
+
+    fs::remove_dir_all(&install_dir).map_err(|error| {
+        format!(
+            "Unable to remove {}: {error}",
+            version
+                .version
+                .as_deref()
+                .map(|value| format!("Blender {value}"))
+                .unwrap_or_else(|| version.display_name.clone())
+        )
+    })
+}
+
+fn temp_install_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(voxelshift_documents_dir(app)?
+        .join(TEMP_INSTALL_DIR_NAME)
+        .join("release-installs"))
+}
+
 fn load_stored_state(app: &AppHandle) -> Result<StoredState, String> {
     let file_path = state_file_path(app)?;
 
@@ -844,7 +1435,7 @@ fn state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir.join(STATE_FILE_NAME))
 }
 
-fn default_scan_roots() -> Vec<PathBuf> {
+fn default_scan_roots(app: &AppHandle) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if let Some(program_files) = std::env::var_os("ProgramFiles") {
@@ -865,6 +1456,10 @@ fn default_scan_roots() -> Vec<PathBuf> {
 
     roots.push(PathBuf::from(r"D:\Blender"));
     roots.push(PathBuf::from(r"D:\Apps\Blender"));
+
+    if let Ok(stable_dir) = stable_install_dir(app) {
+        roots.push(stable_dir);
+    }
 
     roots.into_iter().filter(|path| path.exists()).collect()
 }
@@ -962,3 +1557,4 @@ fn path_to_string(path: &Path) -> String {
 fn eq_ignore_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
+
