@@ -17,3 +17,17 @@ export interface LauncherState {
   scanRoots: string[];
   detectedAt: number;
 }
+
+export interface BlenderReleaseDownload {
+  id: string;
+  channel: string;
+  version: string;
+  fileName: string;
+  releaseDate: string;
+  url: string;
+}
+
+export interface BlenderReleaseListing {
+  platformLabel: string;
+  downloads: BlenderReleaseDownload[];
+}
