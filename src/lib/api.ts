@@ -11,6 +11,13 @@ interface LaunchPayload {
   extraArgs?: string | null;
 }
 
+interface InstallReleasePayload {
+  id: string;
+  version: string;
+  fileName: string;
+  url: string;
+}
+
 export function getLauncherState() {
   return invoke<LauncherState>("get_launcher_state");
 }
@@ -49,4 +56,12 @@ export function openVersionLocation(id: string) {
 
 export function getBlenderReleaseDownloads() {
   return invoke<BlenderReleaseListing>("get_blender_release_downloads");
+}
+
+export function installBlenderRelease(payload: InstallReleasePayload) {
+  return invoke<LauncherState>("install_blender_release", { request: payload });
+}
+
+export function cancelBlenderReleaseInstall(id: string) {
+  return invoke<void>("cancel_blender_release_install", { id });
 }
