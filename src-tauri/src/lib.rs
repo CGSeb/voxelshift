@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,6 +10,7 @@ use tauri::{AppHandle, Manager};
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
 const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
+const BLENDER_RELEASE_INDEX_URL: &str = "https://download.blender.org/release/";
 const MAX_SCAN_DEPTH: usize = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +40,37 @@ struct LauncherState {
     versions: Vec<BlenderVersion>,
     scan_roots: Vec<String>,
     detected_at: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ReleasePlatform {
+    file_suffix: &'static str,
+    label: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct BlenderReleaseChannel {
+    name: String,
+    version: String,
+    url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlenderReleaseDownload {
+    id: String,
+    channel: String,
+    version: String,
+    file_name: String,
+    release_date: String,
+    url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlenderReleaseListing {
+    platform_label: String,
+    downloads: Vec<BlenderReleaseDownload>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -93,7 +126,8 @@ pub fn run() {
             add_scan_root,
             remove_scan_root,
             launch_blender,
-            open_version_location
+            open_version_location,
+            get_blender_release_downloads
         ])
         .run(tauri::generate_context!())
         .expect("error while running Voxel Shift");
@@ -107,6 +141,52 @@ fn get_launcher_state(app: AppHandle) -> Result<LauncherState, String> {
 #[tauri::command]
 fn scan_for_blender_versions(app: AppHandle) -> Result<LauncherState, String> {
     build_launcher_state(&app)
+}
+
+#[tauri::command]
+async fn get_blender_release_downloads() -> Result<BlenderReleaseListing, String> {
+    let platform = current_release_platform().ok_or_else(|| {
+        format!(
+            "This platform is not supported for release downloads: {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+
+    let client = reqwest::Client::new();
+    let root_body = fetch_text(&client, BLENDER_RELEASE_INDEX_URL).await?;
+    let channels = parse_blender_release_channels(&root_body);
+    let mut downloads = Vec::new();
+
+    for channel in channels {
+        let folder_body = match fetch_text(&client, &channel.url).await {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+
+        downloads.extend(parse_release_downloads(
+            &folder_body,
+            &channel,
+            platform.file_suffix,
+        ));
+    }
+
+    downloads.sort_by(|left, right| {
+        compare_version_values(&right.version, &left.version)
+            .then_with(|| right.channel.cmp(&left.channel))
+    });
+
+    if downloads.is_empty() {
+        return Err(format!(
+            "No stable Blender downloads ending with {} were found.",
+            platform.file_suffix
+        ));
+    }
+
+    Ok(BlenderReleaseListing {
+        platform_label: platform.label.to_string(),
+        downloads,
+    })
 }
 
 #[tauri::command]
@@ -401,6 +481,218 @@ fn visit_dir(path: &Path, depth: usize, results: &mut Vec<PathBuf>) {
     }
 }
 
+async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach {url}: {error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("The request to {url} returned an unexpected status: {status}"));
+    }
+
+    response
+        .text()
+        .await
+        .map_err(|error| format!("Could not read {url}: {error}"))
+}
+
+fn parse_blender_release_channels(body: &str) -> Vec<BlenderReleaseChannel> {
+    let mut releases = BTreeMap::<String, BlenderReleaseChannel>::new();
+    let mut remainder = body;
+
+    while let Some(start) = remainder.find("href=\"") {
+        let after_marker = &remainder[start + 6..];
+        let Some(end) = after_marker.find('"') else {
+            break;
+        };
+        let href = &after_marker[..end];
+
+        if let Some(channel) = parse_release_channel_href(href) {
+            releases.entry(channel.version.clone()).or_insert(channel);
+        }
+
+        remainder = &after_marker[end + 1..];
+    }
+
+    let mut channels: Vec<BlenderReleaseChannel> = releases.into_values().collect();
+    channels.sort_by(|left, right| compare_version_values(&right.version, &left.version));
+    channels
+}
+
+fn parse_release_channel_href(href: &str) -> Option<BlenderReleaseChannel> {
+    let trimmed = href.trim();
+
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('?') {
+        return None;
+    }
+
+    let candidate = trimmed
+        .trim_start_matches("./")
+        .trim_start_matches(BLENDER_RELEASE_INDEX_URL)
+        .trim_start_matches("https://download.blender.org/")
+        .trim_start_matches('/');
+    let folder = candidate.strip_prefix("release/").unwrap_or(candidate);
+    let folder = folder.strip_suffix('/')?;
+    let version = folder.strip_prefix("Blender")?;
+
+    if !is_major_minor_release(version) || !is_version_at_least(version, 3, 0) {
+        return None;
+    }
+
+    Some(BlenderReleaseChannel {
+        name: folder.to_string(),
+        version: version.to_string(),
+        url: format!("{BLENDER_RELEASE_INDEX_URL}{folder}/"),
+    })
+}
+
+fn parse_release_downloads(
+    body: &str,
+    channel: &BlenderReleaseChannel,
+    file_suffix: &str,
+) -> Vec<BlenderReleaseDownload> {
+    let mut downloads = BTreeMap::<String, BlenderReleaseDownload>::new();
+
+    for line in body.lines() {
+        let Some((href, release_date)) = parse_directory_listing_line(line) else {
+            continue;
+        };
+
+        if let Some(download) = parse_release_download_href(href, channel, file_suffix, &release_date) {
+            downloads.entry(download.id.clone()).or_insert(download);
+        }
+    }
+
+    downloads.into_values().collect()
+}
+
+fn parse_directory_listing_line(line: &str) -> Option<(&str, String)> {
+    let href_start = line.find("href=\"")?;
+    let after_href = &line[href_start + 6..];
+    let href_end = after_href.find('"')?;
+    let href = &after_href[..href_end];
+
+    let anchor_end = line.find("</a>")?;
+    let date = line[anchor_end + 4..].split_whitespace().next()?;
+
+    if date.is_empty() {
+        None
+    } else {
+        Some((href, date.to_string()))
+    }
+}
+
+fn parse_release_download_href(
+    href: &str,
+    channel: &BlenderReleaseChannel,
+    file_suffix: &str,
+    release_date: &str,
+) -> Option<BlenderReleaseDownload> {
+    let trimmed = href.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('?') {
+        return None;
+    }
+
+    let file_name = trimmed.trim_start_matches("./").split('/').next_back()?;
+    if !file_name.ends_with(file_suffix) {
+        return None;
+    }
+
+    let version = file_name.strip_prefix("blender-")?.strip_suffix(file_suffix)?;
+    if !is_patch_release(version) {
+        return None;
+    }
+
+    let expected_prefix = format!("{}.", channel.version);
+    if !version.starts_with(&expected_prefix) {
+        return None;
+    }
+
+    let url = format!("{}{}", channel.url, file_name);
+
+    Some(BlenderReleaseDownload {
+        id: make_release_id(&url),
+        channel: channel.name.clone(),
+        version: version.to_string(),
+        file_name: file_name.to_string(),
+        release_date: release_date.to_string(),
+        url,
+    })
+}
+
+fn current_release_platform() -> Option<ReleasePlatform> {
+    match std::env::consts::OS {
+        "windows" => Some(ReleasePlatform {
+            file_suffix: "-windows-x64.zip",
+            label: "Windows x64",
+        }),
+        "linux" => Some(ReleasePlatform {
+            file_suffix: "-linux-x64.tar.xz",
+            label: "Linux x64",
+        }),
+        "macos" if std::env::consts::ARCH == "aarch64" => Some(ReleasePlatform {
+            file_suffix: "-macos-arm64.dmg",
+            label: "macOS Apple Silicon",
+        }),
+        "macos" => Some(ReleasePlatform {
+            file_suffix: "-macos-x64.dmg",
+            label: "macOS Intel",
+        }),
+        _ => None,
+    }
+}
+
+fn is_major_minor_release(version: &str) -> bool {
+    let mut segments = version.split('.');
+    let Some(major) = segments.next() else {
+        return false;
+    };
+    let Some(minor) = segments.next() else {
+        return false;
+    };
+
+    segments.next().is_none()
+        && !major.is_empty()
+        && !minor.is_empty()
+        && major.chars().all(|character| character.is_ascii_digit())
+        && minor.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_patch_release(version: &str) -> bool {
+    let mut segments = version.split('.');
+    let Some(major) = segments.next() else {
+        return false;
+    };
+    let Some(minor) = segments.next() else {
+        return false;
+    };
+    let Some(patch) = segments.next() else {
+        return false;
+    };
+
+    segments.next().is_none()
+        && [major, minor, patch]
+            .into_iter()
+            .all(|segment| !segment.is_empty() && segment.chars().all(|character| character.is_ascii_digit()))
+}
+
+fn is_version_at_least(version: &str, min_major: u32, min_minor: u32) -> bool {
+    let mut segments = version.split('.');
+    let major = segments
+        .next()
+        .and_then(|segment| segment.parse::<u32>().ok())
+        .unwrap_or_default();
+    let minor = segments
+        .next()
+        .and_then(|segment| segment.parse::<u32>().ok())
+        .unwrap_or_default();
+
+    (major, minor) >= (min_major, min_minor)
+}
+
 fn normalize_blender_path(path: &str) -> Result<PathBuf, String> {
     let raw = PathBuf::from(path.trim());
 
@@ -577,7 +869,7 @@ fn default_scan_roots() -> Vec<PathBuf> {
     roots.into_iter().filter(|path| path.exists()).collect()
 }
 
-fn version_sort(left: &BlenderVersion, right: &BlenderVersion) -> std::cmp::Ordering {
+fn version_sort(left: &BlenderVersion, right: &BlenderVersion) -> Ordering {
     if left.is_default != right.is_default {
         return right.is_default.cmp(&left.is_default);
     }
@@ -596,6 +888,10 @@ fn version_sort(left: &BlenderVersion, right: &BlenderVersion) -> std::cmp::Orde
     })
 }
 
+fn compare_version_values(left: &str, right: &str) -> Ordering {
+    version_key(Some(left)).cmp(&version_key(Some(right)))
+}
+
 fn version_key(version: Option<&str>) -> Vec<u32> {
     version
         .unwrap_or_default()
@@ -609,6 +905,12 @@ fn make_version_id(path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     normalized.hash(&mut hasher);
     format!("blender-{:016x}", hasher.finish())
+}
+
+fn make_release_id(url: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    url.to_lowercase().hash(&mut hasher);
+    format!("release-{:016x}", hasher.finish())
 }
 
 fn split_command_line(value: &str) -> Vec<String> {

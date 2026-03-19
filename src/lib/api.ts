@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LauncherState } from "../types";
+import type { BlenderReleaseListing, LauncherState } from "../types";
 
 interface RegisterPayload {
   path: string;
@@ -45,4 +45,8 @@ export function launchBlender(payload: LaunchPayload) {
 
 export function openVersionLocation(id: string) {
   return invoke<void>("open_version_location", { id });
+}
+
+export function getBlenderReleaseDownloads() {
+  return invoke<BlenderReleaseListing>("get_blender_release_downloads");
 }
