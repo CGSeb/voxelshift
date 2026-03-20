@@ -25,6 +25,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "../resources/__init__.py",
+      "../resources/blender_manifest.toml"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -35,3 +39,4 @@
     "shortDescription": "Desktop launcher for managing Blender versions"
   }
 }
+

@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "voxel_shift"
+version = "1.0.0"
+name = "VoxelShift"
+tagline = "VoxelShift"
+maintainer = "Voxel Shift <contact@voxelshift.store>"
+
+type = "add-on"
+
+tags = ["other"]
+
+blender_version_min = "4.5.0"
+
+license = [
+  "SPDX:GPL-2.0-or-later",
+]
