@@ -490,6 +490,31 @@ p {
   align-items: center;
 }
 
+.release-launch-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(112, 199, 114, 0.16);
+  color: #b9f0bb;
+  box-shadow: inset 0 0 0 1px rgba(112, 199, 114, 0.24);
+}
+
+.release-launch-button:hover,
+.release-launch-button:focus-visible {
+  background: rgba(112, 199, 114, 0.24);
+  color: #d7ffd7;
+}
+
+.release-launch-button:focus-visible {
+  outline: 2px solid rgba(112, 199, 114, 0.45);
+  outline-offset: 4px;
+}
+
 .favorite-button {
   display: inline-flex;
   align-items: center;
@@ -514,6 +539,12 @@ p {
 .favorite-star {
   width: 1.2rem;
   height: 1.2rem;
+}
+
+.release-launch-icon {
+  width: 1rem;
+  height: 1rem;
+  margin-left: 1px;
 }
 
 .tooltip {

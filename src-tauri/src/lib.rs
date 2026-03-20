@@ -6,18 +6,31 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
+#[cfg(target_os = "windows")]
 const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
+#[cfg(target_os = "linux")]
+const BLENDER_EXECUTABLE_NAME: &str = "blender";
 const BLENDER_RELEASE_INDEX_URL: &str = "https://download.blender.org/release/";
 const RELEASE_INSTALL_EVENT: &str = "release-install-progress";
 const VOXELSHIFT_DIR_NAME: &str = "VoxelShift";
 const STABLE_INSTALL_DIR_NAME: &str = "stable";
 const TEMP_INSTALL_DIR_NAME: &str = ".tmp";
+const BLENDER_EXTENSION_DIR: &str = "portable/extensions/user_default/voxel_shift";
+const BLENDER_EXTENSION_INIT_FILE: &str = "__init__.py";
+const BLENDER_EXTENSION_MANIFEST_FILE: &str = "blender_manifest.toml";
+const BLENDER_EXTENSION_MODULE: &str = "bl_ext.user_default.voxel_shift";
+const BLENDER_EXTENSION_ENABLE_SCRIPT: &str =
+    "import bpy;bpy.ops.preferences.addon_enable(module='bl_ext.user_default.voxel_shift');bpy.ops.wm.save_userpref();";
 const DOWNLOAD_PROGRESS_WEIGHT: f64 = 95.0;
 const INSTALL_CANCELED_MESSAGE: &str = "Installation canceled.";
 const MAX_SCAN_DEPTH: usize = 5;
@@ -390,6 +403,8 @@ async fn install_blender_release(
                 return Err(error);
             }
         };
+
+        install_voxel_shift_extension(&app, &final_install_dir)?;
 
         let _ = fs::remove_file(&archive_path);
         let _ = fs::remove_dir_all(&temp_dir);
@@ -897,14 +912,6 @@ fn current_release_platform() -> Option<ReleasePlatform> {
             file_suffix: "-linux-x64.tar.xz",
             label: "Linux x64",
         }),
-        "macos" if std::env::consts::ARCH == "aarch64" => Some(ReleasePlatform {
-            file_suffix: "-macos-arm64.dmg",
-            label: "macOS Apple Silicon",
-        }),
-        "macos" => Some(ReleasePlatform {
-            file_suffix: "-macos-x64.dmg",
-            label: "macOS Intel",
-        }),
         _ => None,
     }
 }
@@ -980,7 +987,7 @@ fn normalize_blender_path(path: &str) -> Result<PathBuf, String> {
         .map(|name| !name.eq_ignore_ascii_case(BLENDER_EXECUTABLE_NAME))
         .unwrap_or(true)
     {
-        return Err("Please point to blender.exe or a Blender install folder.".to_string());
+        return Err("Please point to the Blender executable or a Blender install folder.".to_string());
     }
 
     candidate
@@ -1071,6 +1078,18 @@ fn extract_version_like_segment(value: &str) -> Option<String> {
     }
 }
 
+fn is_zip_archive(file_name: &str) -> bool {
+    file_name.ends_with(".zip")
+}
+
+fn is_tar_xz_archive(file_name: &str) -> bool {
+    file_name.ends_with(".tar.xz")
+}
+
+fn is_supported_release_archive(file_name: &str) -> bool {
+    is_zip_archive(file_name) || is_tar_xz_archive(file_name)
+}
+
 fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), String> {
     let platform = current_release_platform().ok_or_else(|| {
         format!(
@@ -1099,8 +1118,8 @@ fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), Strin
         ));
     }
 
-    if !request.file_name.ends_with(".zip") {
-        return Err("Automatic installs currently support zip-based Blender releases only.".to_string());
+    if !is_supported_release_archive(&request.file_name) {
+        return Err("Automatic installs currently support .zip and .tar.xz Blender releases only.".to_string());
     }
 
     Ok(())
@@ -1236,57 +1255,12 @@ async fn extract_release_archive(
         fs::create_dir_all(&extraction_dir)
             .map_err(|error| format!("Unable to create the extraction folder: {error}"))?;
 
-        let archive_file = fs::File::open(&archive_path)
-            .map_err(|error| format!("Unable to open the downloaded Blender archive: {error}"))?;
-        let mut archive = zip::ZipArchive::new(archive_file)
-            .map_err(|error| format!("Unable to read the downloaded Blender archive: {error}"))?;
-        let total_entries = archive.len().max(1);
-
-        for index in 0..archive.len() {
-            if control.is_cancel_requested(&request.id)? {
-                return Err(INSTALL_CANCELED_MESSAGE.to_string());
-            }
-
-            let mut entry = archive
-                .by_index(index)
-                .map_err(|error| format!("Unable to read an archive entry: {error}"))?;
-            let relative_path = entry.enclosed_name().map(Path::to_path_buf).ok_or_else(|| {
-                format!("The archive entry '{}' has an invalid path.", entry.name())
-            })?;
-            let output_path = extraction_dir.join(relative_path);
-
-            if entry.is_dir() {
-                fs::create_dir_all(&output_path)
-                    .map_err(|error| format!("Unable to create an extracted folder: {error}"))?;
-            } else {
-                if let Some(parent) = output_path.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|error| format!("Unable to prepare an extracted folder: {error}"))?;
-                }
-
-                let mut output = fs::File::create(&output_path)
-                    .map_err(|error| format!("Unable to create an extracted file: {error}"))?;
-                std::io::copy(&mut entry, &mut output)
-                    .map_err(|error| format!("Unable to extract a Blender file: {error}"))?;
-            }
-
-            let extract_ratio = (index + 1) as f64 / total_entries as f64;
-            emit_release_install_progress(
-                &app,
-                ReleaseInstallProgress {
-                    release_id: request.id.clone(),
-                    phase: "extracting".to_string(),
-                    progress_percent: Some(
-                        DOWNLOAD_PROGRESS_WEIGHT
-                            + extract_ratio * (100.0 - DOWNLOAD_PROGRESS_WEIGHT),
-                    ),
-                    downloaded_bytes: 0,
-                    total_bytes: None,
-                    speed_bytes_per_second: None,
-                    install_dir: None,
-                    message: format!("Extracting {}", request.file_name),
-                },
-            );
+        if is_zip_archive(&request.file_name) {
+            extract_zip_release_archive(&app, &control, &request, &archive_path, &extraction_dir)?;
+        } else if is_tar_xz_archive(&request.file_name) {
+            extract_tar_xz_release_archive(&app, &control, &request, &archive_path, &extraction_dir)?;
+        } else {
+            return Err("Automatic installs currently support .zip and .tar.xz Blender releases only.".to_string());
         }
 
         if control.is_cancel_requested(&request.id)? {
@@ -1298,6 +1272,154 @@ async fn extract_release_archive(
     .await
     .map_err(|error| format!("Failed to finish the Blender install: {error}"))?
 }
+
+fn extract_zip_release_archive(
+    app: &AppHandle,
+    control: &ReleaseInstallControl,
+    request: &InstallReleaseRequest,
+    archive_path: &Path,
+    extraction_dir: &Path,
+) -> Result<(), String> {
+    let archive_file = fs::File::open(archive_path)
+        .map_err(|error| format!("Unable to open the downloaded Blender archive: {error}"))?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .map_err(|error| format!("Unable to read the downloaded Blender archive: {error}"))?;
+    let total_entries = archive.len().max(1);
+
+    for index in 0..archive.len() {
+        if control.is_cancel_requested(&request.id)? {
+            return Err(INSTALL_CANCELED_MESSAGE.to_string());
+        }
+
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Unable to read an archive entry: {error}"))?;
+        let relative_path = entry.enclosed_name().map(Path::to_path_buf).ok_or_else(|| {
+            format!("The archive entry '{}' has an invalid path.", entry.name())
+        })?;
+        let output_path = extraction_dir.join(relative_path);
+
+        if entry.is_dir() {
+            fs::create_dir_all(&output_path)
+                .map_err(|error| format!("Unable to create an extracted folder: {error}"))?;
+        } else {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("Unable to prepare an extracted folder: {error}"))?;
+            }
+
+            let mut output = fs::File::create(&output_path)
+                .map_err(|error| format!("Unable to create an extracted file: {error}"))?;
+            std::io::copy(&mut entry, &mut output)
+                .map_err(|error| format!("Unable to extract a Blender file: {error}"))?;
+        }
+
+        let extract_ratio = (index + 1) as f64 / total_entries as f64;
+        emit_release_install_progress(
+            app,
+            ReleaseInstallProgress {
+                release_id: request.id.clone(),
+                phase: "extracting".to_string(),
+                progress_percent: Some(
+                    DOWNLOAD_PROGRESS_WEIGHT
+                        + extract_ratio * (100.0 - DOWNLOAD_PROGRESS_WEIGHT),
+                ),
+                downloaded_bytes: 0,
+                total_bytes: None,
+                speed_bytes_per_second: None,
+                install_dir: None,
+                message: format!("Extracting {}", request.file_name),
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn extract_tar_xz_release_archive(
+    app: &AppHandle,
+    control: &ReleaseInstallControl,
+    request: &InstallReleaseRequest,
+    archive_path: &Path,
+    extraction_dir: &Path,
+) -> Result<(), String> {
+    emit_release_install_progress(
+        app,
+        ReleaseInstallProgress {
+            release_id: request.id.clone(),
+            phase: "extracting".to_string(),
+            progress_percent: None,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bytes_per_second: None,
+            install_dir: None,
+            message: format!("Extracting {}", request.file_name),
+        },
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut child = Command::new("tar");
+        child
+            .arg("-xJf")
+            .arg(archive_path)
+            .arg("-C")
+            .arg(extraction_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let mut child = child
+            .spawn()
+            .map_err(|error| format!("Unable to start tar for {}: {error}", request.file_name))?;
+
+        loop {
+            if control.is_cancel_requested(&request.id)? {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(INSTALL_CANCELED_MESSAGE.to_string());
+            }
+
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("Unable to monitor tar while extracting {}: {error}", request.file_name))?
+            {
+                let mut stderr_output = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    let mut buffer = Vec::new();
+                    stderr
+                        .read_to_end(&mut buffer)
+                        .map_err(|error| format!("Unable to read tar output for {}: {error}", request.file_name))?;
+                    stderr_output = String::from_utf8_lossy(&buffer).trim().to_string();
+                }
+
+                if status.success() {
+                    return Ok(());
+                }
+
+                let detail = if stderr_output.is_empty() {
+                    format!("tar exited with status {}.", status)
+                } else {
+                    stderr_output
+                };
+
+                return Err(format!(
+                    "Unable to extract {} with tar: {}",
+                    request.file_name, detail
+                ));
+            }
+
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (control, archive_path, extraction_dir);
+        Err("Linux tar.xz release extraction is only supported on Linux builds.".to_string())
+    }
+}
+
 fn finalize_extracted_release(
     request: &InstallReleaseRequest,
     extraction_dir: &Path,
@@ -1342,7 +1464,7 @@ fn finalize_extracted_release(
     let executable = scan_for_blender_executables(&final_install_dir, MAX_SCAN_DEPTH)
         .into_iter()
         .next()
-        .ok_or_else(|| "The downloaded archive did not contain blender.exe.".to_string())?;
+        .ok_or_else(|| "The downloaded archive did not contain the Blender executable.".to_string())?;
 
     if !executable.exists() {
         return Err("The extracted Blender executable could not be found.".to_string());
@@ -1355,8 +1477,105 @@ fn emit_release_install_progress(app: &AppHandle, progress: ReleaseInstallProgre
     let _ = app.emit(RELEASE_INSTALL_EVENT, progress);
 }
 
+fn install_voxel_shift_extension(app: &AppHandle, blender_install_dir: &Path) -> Result<(), String> {
+    let extension_dir = blender_install_dir.join(BLENDER_EXTENSION_DIR);
+    fs::create_dir_all(&extension_dir).map_err(|error| {
+        format!(
+            "Unable to create the Voxel Shift extension folder in {}: {error}",
+            path_to_string(&extension_dir)
+        )
+    })?;
+
+    for file_name in [BLENDER_EXTENSION_INIT_FILE, BLENDER_EXTENSION_MANIFEST_FILE] {
+        let source_path = resolve_extension_resource_path(app, file_name)?;
+        let destination_path = extension_dir.join(file_name);
+
+        fs::copy(&source_path, &destination_path).map_err(|error| {
+            format!(
+                "Unable to copy {} into {}: {error}",
+                path_to_string(&source_path),
+                path_to_string(&destination_path)
+            )
+        })?;
+    }
+
+
+    enable_voxel_shift_extension(blender_install_dir)?;
+    Ok(())
+}
+
+fn enable_voxel_shift_extension(blender_install_dir: &Path) -> Result<(), String> {
+    let executable = scan_for_blender_executables(blender_install_dir, MAX_SCAN_DEPTH)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "The installed Blender executable could not be found.".to_string())?;
+    let mut command = Command::new(&executable);
+    command
+        .arg("-b")
+        .arg("--python-expr")
+        .arg(BLENDER_EXTENSION_ENABLE_SCRIPT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+
+    let output = command.output().map_err(|error| {
+        format!(
+            "Unable to enable the Voxel Shift Blender extension in {}: {error}",
+            path_to_string(&executable)
+        )
+    })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        format!("Blender exited with status {}.", output.status)
+    } else {
+        stderr
+    };
+
+    Err(format!(
+        "Blender installed successfully, but enabling {} failed: {}",
+        BLENDER_EXTENSION_MODULE, detail
+    ))
+}
+
+fn resolve_extension_resource_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+    let bundled_path = app
+        .path()
+        .resolve(file_name, BaseDirectory::Resource)
+        .map_err(|error| format!("Unable to locate bundled resource {file_name}: {error}"))?;
+
+    if bundled_path.exists() {
+        return Ok(bundled_path);
+    }
+
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("resources")
+        .join(file_name);
+
+    if dev_path.exists() {
+        return Ok(dev_path);
+    }
+
+    Err(format!(
+        "Unable to find the Voxel Shift extension resource {}.",
+        file_name
+    ))
+}
+
 fn release_folder_name(file_name: &str) -> String {
-    file_name.trim_end_matches(".zip").trim().to_string()
+    file_name
+        .trim_end_matches(".tar.xz")
+        .trim_end_matches(".zip")
+        .trim()
+        .to_string()
 }
 
 fn voxelshift_documents_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1557,4 +1776,5 @@ fn path_to_string(path: &Path) -> String {
 fn eq_ignore_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
+
 

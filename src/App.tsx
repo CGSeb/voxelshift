@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Star } from "lucide-react";
+import { Play, Star } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { Tooltip } from "./components/Tooltip";
@@ -8,6 +8,7 @@ import {
   getBlenderReleaseDownloads,
   getLauncherState,
   installBlenderRelease,
+  launchBlender,
   removeBlenderVersion,
 } from "./lib/api";
 import type {
@@ -347,6 +348,16 @@ export default function App() {
     }
   }
 
+  async function launchInstalledRelease(version: BlenderVersion) {
+    try {
+      const nextLauncherState = await launchBlender({ id: version.id });
+      setLauncherState(nextLauncherState);
+      setReleaseError(null);
+    } catch (error) {
+      setReleaseError(readErrorMessage(error, `Could not launch Blender ${version.version ?? version.displayName}.`));
+    }
+  }
+
   const releaseDownloads = releaseListing?.downloads ?? [];
   const installedReleaseVersions = new Map<string, BlenderVersion>();
 
@@ -550,22 +561,35 @@ export default function App() {
                       <div className="release-package">{download.releaseDate}</div>
                       <div className="release-actions">
                         {isInstalled ? (
-                          <Tooltip content={isFavorite ? "Remove favorite" : "Mark as favorite"}>
-                            <button
-                              className={isFavorite ? "favorite-button favorite-button-active" : "favorite-button"}
-                              type="button"
-                              onClick={() => toggleFavorite(download)}
-                              aria-pressed={isFavorite}
-                              aria-label={isFavorite ? `Remove ${download.version} from favorites` : `Mark ${download.version} as favorite`}
-                            >
-                              <Star
-                                className="favorite-star"
-                                aria-hidden="true"
-                                fill={isFavorite ? "currentColor" : "none"}
-                                strokeWidth={2}
-                              />
-                            </button>
-                          </Tooltip>
+                          <>
+                            <Tooltip content={`Launch Blender ${download.version}`}>
+                              <button
+                                className="release-launch-button"
+                                type="button"
+                                onClick={() => void launchInstalledRelease(installedVersion!)}
+                                aria-label={`Launch Blender ${download.version}`}
+                              >
+                                <Play className="release-launch-icon" aria-hidden="true" fill="currentColor" strokeWidth={1.75} />
+                              </button>
+                            </Tooltip>
+
+                            <Tooltip content={isFavorite ? "Remove favorite" : "Mark as favorite"}>
+                              <button
+                                className={isFavorite ? "favorite-button favorite-button-active" : "favorite-button"}
+                                type="button"
+                                onClick={() => toggleFavorite(download)}
+                                aria-pressed={isFavorite}
+                                aria-label={isFavorite ? `Remove ${download.version} from favorites` : `Mark ${download.version} as favorite`}
+                              >
+                                <Star
+                                  className="favorite-star"
+                                  aria-hidden="true"
+                                  fill={isFavorite ? "currentColor" : "none"}
+                                  strokeWidth={2}
+                                />
+                              </button>
+                            </Tooltip>
+                          </>
                         ) : null}
 
                         {isInstalling ? (
