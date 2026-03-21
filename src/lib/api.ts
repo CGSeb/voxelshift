@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BlenderReleaseListing, LauncherState } from "../types";
+import type { BlenderReleaseListing, LauncherState, RecentProject } from "../types";
 
 interface RegisterPayload {
   path: string;
@@ -11,6 +11,11 @@ interface LaunchPayload {
   extraArgs?: string | null;
 }
 
+interface LaunchProjectPayload {
+  id: string;
+  projectPath: string;
+}
+
 interface InstallReleasePayload {
   id: string;
   version: string;
@@ -20,6 +25,10 @@ interface InstallReleasePayload {
 
 export function getLauncherState() {
   return invoke<LauncherState>("get_launcher_state");
+}
+
+export function getRecentProjects() {
+  return invoke<RecentProject[]>("get_recent_projects");
 }
 
 export function scanForBlenderVersions() {
@@ -48,6 +57,10 @@ export function removeScanRoot(path: string) {
 
 export function launchBlender(payload: LaunchPayload) {
   return invoke<LauncherState>("launch_blender", { request: payload });
+}
+
+export function launchBlenderProject(payload: LaunchProjectPayload) {
+  return invoke<LauncherState>("launch_blender_project", { request: payload });
 }
 
 export function openVersionLocation(id: string) {

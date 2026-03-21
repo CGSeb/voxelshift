@@ -30,6 +30,7 @@ const TEMP_INSTALL_DIR_NAME: &str = ".tmp";
 const BLENDER_EXTENSION_DIR: &str = "portable/extensions/user_default/voxel_shift";
 const BLENDER_EXTENSION_INIT_FILE: &str = "__init__.py";
 const BLENDER_EXTENSION_MANIFEST_FILE: &str = "blender_manifest.toml";
+const BLENDER_EXTENSION_STATE_FILE: &str = "VoxelShift.json";
 const BLENDER_EXTENSION_MODULE: &str = "bl_ext.user_default.voxel_shift";
 const BLENDER_EXTENSION_ENABLE_SCRIPT: &str =
     "import bpy;bpy.ops.preferences.addon_enable(module='bl_ext.user_default.voxel_shift');bpy.ops.wm.save_userpref();";
@@ -64,6 +65,29 @@ struct LauncherState {
     versions: Vec<BlenderVersion>,
     scan_roots: Vec<String>,
     detected_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecentProject {
+    id: String,
+    name: String,
+    file_path: String,
+    thumbnail_path: Option<String>,
+    blender_id: String,
+    blender_display_name: String,
+    blender_version: Option<String>,
+    saved_at: String,
+    exists: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct VoxelShiftState {
+    #[serde(default)]
+    last_open: Option<String>,
+    #[serde(default)]
+    blender_projects: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +163,13 @@ struct RegisterRequest {
 struct LaunchRequest {
     id: String,
     extra_args: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchProjectRequest {
+    id: String,
+    project_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -239,6 +270,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_launcher_state,
+            get_recent_projects,
             scan_for_blender_versions,
             register_blender_version,
             remove_blender_version,
@@ -246,6 +278,7 @@ pub fn run() {
             add_scan_root,
             remove_scan_root,
             launch_blender,
+            launch_blender_project,
             open_version_location,
             get_blender_release_downloads,
             install_blender_release,
@@ -258,6 +291,12 @@ pub fn run() {
 #[tauri::command]
 fn get_launcher_state(app: AppHandle) -> Result<LauncherState, String> {
     build_launcher_state(&app)
+}
+
+#[tauri::command]
+fn get_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
+    let state = build_launcher_state(&app)?;
+    Ok(collect_recent_projects(&state.versions))
 }
 
 #[tauri::command]
@@ -594,11 +633,51 @@ fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherStat
         .map(split_command_line)
         .unwrap_or_default();
 
-    std::process::Command::new(&version.executable_path)
+    Command::new(&version.executable_path)
         .args(args)
         .spawn()
         .map_err(|error| format!("Failed to launch Blender: {error}"))?;
 
+    remember_launched_version(&mut stored, version);
+    save_stored_state(&app, &stored)?;
+    build_launcher_state(&app)
+}
+
+#[tauri::command]
+fn launch_blender_project(app: AppHandle, request: LaunchProjectRequest) -> Result<LauncherState, String> {
+    let mut stored = load_stored_state(&app)?;
+    let state = build_launcher_state(&app)?;
+    let version = state
+        .versions
+        .iter()
+        .find(|version| version.id == request.id)
+        .ok_or_else(|| "Could not find that Blender version.".to_string())?;
+
+    if !version.available {
+        return Err("That Blender executable is missing.".to_string());
+    }
+
+    let project_path = PathBuf::from(request.project_path.trim());
+
+    if request.project_path.trim().is_empty() {
+        return Err("The Blender project path is missing.".to_string());
+    }
+
+    if !project_path.exists() {
+        return Err("That Blender project file could not be found.".to_string());
+    }
+
+    Command::new(&version.executable_path)
+        .arg(&project_path)
+        .spawn()
+        .map_err(|error| format!("Failed to launch Blender: {error}"))?;
+
+    remember_launched_version(&mut stored, version);
+    save_stored_state(&app, &stored)?;
+    build_launcher_state(&app)
+}
+
+fn remember_launched_version(stored: &mut StoredState, version: &BlenderVersion) {
     let launched_at = current_timestamp();
 
     if let Some(entry) = stored
@@ -607,18 +686,16 @@ fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherStat
         .find(|tracked| tracked.id == version.id)
     {
         entry.last_launched_at = Some(launched_at);
-    } else {
-        stored.tracked_versions.push(TrackedVersion {
-            id: version.id.clone(),
-            executable_path: version.executable_path.clone(),
-            display_name: None,
-            source: version.source.clone(),
-            last_launched_at: Some(launched_at),
-        });
+        return;
     }
 
-    save_stored_state(&app, &stored)?;
-    build_launcher_state(&app)
+    stored.tracked_versions.push(TrackedVersion {
+        id: version.id.clone(),
+        executable_path: version.executable_path.clone(),
+        display_name: trim_to_option(version.display_name.clone()),
+        source: version.source.clone(),
+        last_launched_at: Some(launched_at),
+    });
 }
 
 #[tauri::command]
@@ -703,6 +780,83 @@ fn build_launcher_state(app: &AppHandle) -> Result<LauncherState, String> {
         scan_roots: stored.scan_roots,
         detected_at: current_timestamp(),
     })
+}
+
+fn collect_recent_projects(versions: &[BlenderVersion]) -> Vec<RecentProject> {
+    let mut projects_by_path = BTreeMap::<String, RecentProject>::new();
+
+    for version in versions.iter().filter(|version| version.available) {
+        let extension_dir = PathBuf::from(&version.install_dir).join(BLENDER_EXTENSION_DIR);
+        let config_path = extension_dir.join(BLENDER_EXTENSION_STATE_FILE);
+        let state = match read_voxelshift_state(&config_path) {
+            Some(state) => state,
+            None => continue,
+        };
+
+        let _ = state.last_open.as_deref();
+
+        for (file_path, saved_at) in state.blender_projects {
+            let trimmed_file_path = file_path.trim();
+            let trimmed_saved_at = saved_at.trim();
+
+            if trimmed_file_path.is_empty() || trimmed_saved_at.is_empty() {
+                continue;
+            }
+
+            let project_name = Path::new(trimmed_file_path)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(trimmed_file_path)
+                .to_string();
+
+            let project = RecentProject {
+                id: make_recent_project_id(trimmed_file_path),
+                name: project_name.clone(),
+                file_path: trimmed_file_path.to_string(),
+                thumbnail_path: recent_project_thumbnail_path(&extension_dir, &project_name),
+                blender_id: version.id.clone(),
+                blender_display_name: version.display_name.clone(),
+                blender_version: version.version.clone(),
+                saved_at: trimmed_saved_at.to_string(),
+                exists: Path::new(trimmed_file_path).exists(),
+            };
+
+            let key = trimmed_file_path.to_lowercase();
+
+            match projects_by_path.get(&key) {
+                Some(existing) if existing.saved_at >= project.saved_at => {}
+                _ => {
+                    projects_by_path.insert(key, project);
+                }
+            }
+        }
+    }
+
+    let mut projects = projects_by_path.into_values().collect::<Vec<_>>();
+    projects.sort_by(|left, right| {
+        right
+            .saved_at
+            .cmp(&left.saved_at)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    projects.truncate(12);
+    projects
+}
+
+fn read_voxelshift_state(path: &Path) -> Option<VoxelShiftState> {
+    let contents = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<VoxelShiftState>(&contents).ok()
+}
+
+fn recent_project_thumbnail_path(extension_dir: &Path, project_name: &str) -> Option<String> {
+    let thumbnail_path = extension_dir.join(format!("VS_THUMB_{project_name}.jpg"));
+
+    if thumbnail_path.exists() {
+        Some(path_to_string(&thumbnail_path))
+    } else {
+        None
+    }
 }
 
 fn discover_versions(app: &AppHandle, scan_roots: &[String]) -> Vec<BlenderVersion> {
@@ -2152,6 +2306,12 @@ fn make_version_id(path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     normalized.hash(&mut hasher);
     format!("blender-{:016x}", hasher.finish())
+}
+
+fn make_recent_project_id(path: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.to_lowercase().hash(&mut hasher);
+    format!("project-{:016x}", hasher.finish())
 }
 
 fn make_release_id(url: &str) -> String {

@@ -11,7 +11,8 @@ interface ReleasesPageProps {
   releaseListing: BlenderReleaseListing | null;
   releaseError: string | null;
   isLoadingReleases: boolean;
-  favoriteReleaseIds: string[];
+  favoriteVersionCount: number;
+  favoriteReleaseValues: string[];
   installStatuses: Record<string, BlenderReleaseInstallProgress>;
   installedReleaseVersions: Map<string, BlenderVersion>;
   onRefresh: () => void;
@@ -30,7 +31,7 @@ interface ReleaseListProps {
   emptyTitle: string;
   emptyMessage: string;
   isExperimentalList?: boolean;
-  favoriteReleaseIds: string[];
+  favoriteReleaseValues: string[];
   installStatuses: Record<string, BlenderReleaseInstallProgress>;
   installedReleaseVersions: Map<string, BlenderVersion>;
   isCurrentPlatformList: boolean;
@@ -47,7 +48,7 @@ function ReleaseList({
   emptyTitle,
   emptyMessage,
   isExperimentalList = false,
-  favoriteReleaseIds,
+  favoriteReleaseValues,
   installStatuses,
   installedReleaseVersions,
   isCurrentPlatformList,
@@ -80,7 +81,7 @@ function ReleaseList({
           <ReleaseRow
             key={download.id}
             download={download}
-            favoriteReleaseIds={favoriteReleaseIds}
+            favoriteReleaseValues={favoriteReleaseValues}
             installStatuses={installStatuses}
             installedReleaseVersions={installedReleaseVersions}
             isCurrentPlatformList={isCurrentPlatformList}
@@ -101,7 +102,8 @@ export function ReleasesPage({
   releaseListing,
   releaseError,
   isLoadingReleases,
-  favoriteReleaseIds,
+  favoriteVersionCount,
+  favoriteReleaseValues,
   installStatuses,
   installedReleaseVersions,
   onRefresh,
@@ -136,7 +138,7 @@ export function ReleasesPage({
         </div>
 
         <div className="release-hero-actions">
-          <span className="section-badge">{favoriteReleaseIds.length} favorites</span>
+          <span className="section-badge">{favoriteVersionCount} favorites</span>
           <button className="card-action card-action-secondary" type="button" onClick={onRefresh}>
             {isLoadingReleases ? "Refreshing..." : "Refresh list"}
           </button>
@@ -182,7 +184,7 @@ export function ReleasesPage({
           downloads={stableDownloads}
           emptyTitle="No stable builds found"
           emptyMessage="Scanning the official Blender release folders did not return any matching downloads."
-          favoriteReleaseIds={favoriteReleaseIds}
+          favoriteReleaseValues={favoriteReleaseValues}
           installStatuses={installStatuses}
           installedReleaseVersions={installedReleaseVersions}
           isCurrentPlatformList
@@ -199,7 +201,7 @@ export function ReleasesPage({
           emptyTitle={`No experimental ${releaseListing?.platformLabel ?? "current OS"} builds found`}
           emptyMessage="The daily builds page did not expose any installable x64 entries for this operating system."
           isExperimentalList
-          favoriteReleaseIds={favoriteReleaseIds}
+          favoriteReleaseValues={favoriteReleaseValues}
           installStatuses={installStatuses}
           installedReleaseVersions={installedReleaseVersions}
           isCurrentPlatformList
@@ -218,4 +220,3 @@ export function ReleasesPage({
     </section>
   );
 }
-
