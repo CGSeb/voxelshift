@@ -551,7 +551,7 @@ p {
 }
 
 .release-row-item {
-  align-items: start;
+  align-items: center;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -573,6 +573,21 @@ p {
 .release-channel-chip {
   background: rgba(245, 155, 50, 0.14);
   color: #ffd8a9;
+}
+
+.release-channel-chip-alpha {
+  background: rgba(214, 64, 69, 0.18);
+  color: #ffb7ba;
+}
+
+.release-channel-chip-beta {
+  background: rgba(245, 155, 50, 0.2);
+  color: #ffd39a;
+}
+
+.release-channel-chip-candidate {
+  background: rgba(74, 131, 255, 0.2);
+  color: #bfd4ff;
 }
 
 .release-package {
@@ -798,6 +813,39 @@ p {
   }
 }
 
+.release-switcher-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.release-tab-bar {
+  display: inline-flex;
+  gap: 8px;
+  width: fit-content;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.release-tab-bar-secondary {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.release-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.72rem 1rem;
+  color: var(--text-muted);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.release-tab-active {
+  background: rgba(255, 255, 255, 0.92);
+  color: #101010;
+  font-weight: 700;
+}
 @media (max-width: 900px) {
   .app-topbar,
   .release-hero {
@@ -816,6 +864,11 @@ p {
 
   .release-hero-actions {
     justify-content: flex-start;
+  }
+
+  .release-tab-bar {
+    width: 100%;
+    overflow-x: auto;
   }
 
   .release-row {
@@ -858,6 +911,11 @@ p {
     text-align: center;
   }
 
+  .release-tab {
+    flex: 1;
+    text-align: center;
+  }
+
   .favorite-grid,
   .overview-grid {
     grid-template-columns: 1fr;
@@ -867,3 +925,9 @@ p {
     flex-wrap: wrap;
   }
 }
+
+
+
+
+
+
