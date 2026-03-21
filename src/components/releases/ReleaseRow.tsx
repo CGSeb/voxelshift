@@ -4,7 +4,7 @@ import type { BlenderReleaseDownload, BlenderReleaseInstallProgress, BlenderVers
 
 interface ReleaseRowProps {
   download: BlenderReleaseDownload;
-  favoriteReleaseIds: string[];
+  favoriteReleaseValues: string[];
   installStatuses: Record<string, BlenderReleaseInstallProgress>;
   installedReleaseVersions: Map<string, BlenderVersion>;
   isCurrentPlatformList: boolean;
@@ -65,7 +65,7 @@ function getChannelChipClassName(channel: string, isExperimentalList: boolean) {
 
 export function ReleaseRow({
   download,
-  favoriteReleaseIds,
+  favoriteReleaseValues,
   installStatuses,
   installedReleaseVersions,
   isCurrentPlatformList,
@@ -76,7 +76,7 @@ export function ReleaseRow({
   onToggleFavorite,
   onOpenUninstall,
 }: ReleaseRowProps) {
-  const isFavorite = favoriteReleaseIds.includes(download.id);
+  const isFavorite = favoriteReleaseValues.includes(download.version) || favoriteReleaseValues.includes(download.id);
   const installedVersion = isCurrentPlatformList ? installedReleaseVersions.get(download.version) : undefined;
   const isInstalled = Boolean(installedVersion);
   const installStatus = isCurrentPlatformList ? installStatuses[download.id] : undefined;

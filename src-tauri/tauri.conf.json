@@ -13,14 +13,24 @@
     "windows": [
       {
         "title": "Voxel Shift",
-        "width": 1440,
+        "width": 1320,
+        "maxWidth": 1320,
         "height": 960,
         "minWidth": 1100,
         "minHeight": 760,
         "resizable": true,
         "fullscreen": false
       }
-    ]
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
   },
   "bundle": {
     "active": true,
@@ -39,4 +49,5 @@
     "shortDescription": "Desktop launcher for managing Blender versions"
   }
 }
+
 

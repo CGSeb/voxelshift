@@ -19,6 +19,18 @@ export interface LauncherState {
   detectedAt: number;
 }
 
+export interface RecentProject {
+  id: string;
+  name: string;
+  filePath: string;
+  thumbnailPath: string | null;
+  blenderId: string;
+  blenderDisplayName: string;
+  blenderVersion: string | null;
+  savedAt: string;
+  exists: boolean;
+}
+
 export interface BlenderReleaseDownload {
   id: string;
   channel: string;

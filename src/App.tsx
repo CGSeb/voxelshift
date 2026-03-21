@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { AppLayout } from "./components/layout/AppLayout";
 import type { PageKey } from "./components/layout/AppMenu";
@@ -7,8 +7,10 @@ import {
   cancelBlenderReleaseInstall,
   getBlenderReleaseDownloads,
   getLauncherState,
+  getRecentProjects,
   installBlenderRelease,
   launchBlender,
+  launchBlenderProject,
   removeBlenderVersion,
 } from "./lib/api";
 import { HomePage } from "./pages/HomePage";
@@ -19,6 +21,7 @@ import type {
   BlenderReleaseListing,
   BlenderVersion,
   LauncherState,
+  RecentProject,
   ReleaseInstallPhase,
 } from "./types";
 
@@ -28,9 +31,9 @@ const installCanceledMessage = "Installation canceled.";
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string; description: string }> = {
   home: {
-    eyebrow: "Workspace",
-    title: "Create from one launcher home",
-    description: "Keep recent project shortcuts, favorite builds, and release management inside a single navigation shell.",
+    eyebrow: "",
+    title: "",
+    description: "",
   },
   releases: {
     eyebrow: "Release Library",
@@ -39,15 +42,15 @@ const pageMeta: Record<PageKey, { eyebrow: string; title: string; description: s
   },
 };
 
-function persistFavoriteReleaseIds(ids: string[]) {
+function persistFavoriteReleaseValues(values: string[]) {
   if (typeof window === "undefined") {
     return;
   }
 
-  window.localStorage.setItem(favoriteReleaseStorageKey, JSON.stringify(ids));
+  window.localStorage.setItem(favoriteReleaseStorageKey, JSON.stringify(values));
 }
 
-function readFavoriteReleaseIds() {
+function readFavoriteReleaseValues() {
   if (typeof window === "undefined") {
     return [] as string[];
   }
@@ -59,10 +62,35 @@ function readFavoriteReleaseIds() {
     }
 
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0) : [];
   } catch {
     return [] as string[];
   }
+}
+
+function isLegacyFavoriteReleaseId(value: string) {
+  return value.startsWith("release-");
+}
+
+function uniqueFavoriteValues(values: string[]) {
+  const seen = new Set<string>();
+  const next: string[] = [];
+
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+
+    seen.add(trimmed);
+    next.push(trimmed);
+  }
+
+  return next;
+}
+
+function haveSameValues(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function readErrorMessage(error: unknown, fallback: string) {
@@ -110,10 +138,13 @@ export default function App() {
   const [activePage, setActivePage] = useState<PageKey>("home");
   const [releaseListing, setReleaseListing] = useState<BlenderReleaseListing | null>(null);
   const [launcherState, setLauncherState] = useState<LauncherState | null>(null);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
   const [installStatuses, setInstallStatuses] = useState<Record<string, BlenderReleaseInstallProgress>>({});
   const [isLoadingReleases, setIsLoadingReleases] = useState(false);
+  const [isLoadingHome, setIsLoadingHome] = useState(false);
   const [releaseError, setReleaseError] = useState<string | null>(null);
-  const [favoriteReleaseIds, setFavoriteReleaseIds] = useState<string[]>(() => readFavoriteReleaseIds());
+  const [homeError, setHomeError] = useState<string | null>(null);
+  const [favoriteReleaseValues, setFavoriteReleaseValues] = useState<string[]>(() => readFavoriteReleaseValues());
   const [pendingUninstallDownload, setPendingUninstallDownload] = useState<BlenderReleaseDownload | null>(null);
   const [isRemovingVersion, setIsRemovingVersion] = useState(false);
   const [removeVersionError, setRemoveVersionError] = useState<string | null>(null);
@@ -153,6 +184,40 @@ export default function App() {
     };
   }, []);
 
+  async function refreshHomePageData(options?: { silent?: boolean }) {
+    const isSilent = options?.silent ?? false;
+
+    if (!isSilent) {
+      setIsLoadingHome(true);
+    }
+
+    setHomeError(null);
+
+    const [launcherResult, recentProjectsResult] = await Promise.allSettled([getLauncherState(), getRecentProjects()]);
+
+    if (launcherResult.status === "fulfilled") {
+      setLauncherState(launcherResult.value);
+    } else {
+      setLauncherState(null);
+      setHomeError(readErrorMessage(launcherResult.reason, "Could not load your installed Blender versions."));
+    }
+
+    if (recentProjectsResult.status === "fulfilled") {
+      setRecentProjects(recentProjectsResult.value);
+    } else {
+      setRecentProjects([]);
+      setHomeError(readErrorMessage(recentProjectsResult.reason, "Could not load recent Blender projects."));
+    }
+
+    if (!isSilent) {
+      setIsLoadingHome(false);
+    }
+  }
+
+  const refreshHomePageDataEvent = useEffectEvent(async (options?: { silent?: boolean }) => {
+    await refreshHomePageData(options);
+  });
+
   async function refreshReleasePageData() {
     setIsLoadingReleases(true);
     setReleaseError(null);
@@ -182,6 +247,48 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (activePage !== "home") {
+      return;
+    }
+
+    let isDisposed = false;
+    let isRefreshing = false;
+
+    async function refreshWithGuard() {
+      if (isDisposed || isRefreshing) {
+        return;
+      }
+
+      isRefreshing = true;
+
+      try {
+        await refreshHomePageDataEvent();
+      } finally {
+        isRefreshing = false;
+      }
+    }
+
+    void refreshWithGuard();
+
+    const intervalId = window.setInterval(() => {
+      if (isDisposed || isRefreshing) {
+        return;
+      }
+
+      isRefreshing = true;
+
+      void refreshHomePageDataEvent({ silent: true }).finally(() => {
+        isRefreshing = false;
+      });
+    }, 10_000);
+
+    return () => {
+      isDisposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activePage]);
+
+  useEffect(() => {
     if (activePage !== "releases" || releaseListing) {
       return;
     }
@@ -189,25 +296,55 @@ export default function App() {
     void refreshReleasePageData();
   }, [activePage, releaseListing]);
 
-  function toggleFavorite(download: BlenderReleaseDownload) {
-    setFavoriteReleaseIds((current) => {
-      const next = current.includes(download.id)
-        ? current.filter((id) => id !== download.id)
-        : [...current, download.id];
+  useEffect(() => {
+    if (!releaseListing) {
+      return;
+    }
 
-      persistFavoriteReleaseIds(next);
+    const downloads = [
+      ...releaseListing.stableDownloads,
+      ...releaseListing.experimentalGroups.flatMap((group) => group.downloads),
+    ];
+
+    const nextValues = uniqueFavoriteValues(
+      favoriteReleaseValues.flatMap((value) => {
+        if (!isLegacyFavoriteReleaseId(value)) {
+          return [value];
+        }
+
+        const matchingDownload = downloads.find((download) => download.id === value);
+        return matchingDownload ? [matchingDownload.version] : [value];
+      }),
+    );
+
+    if (haveSameValues(nextValues, favoriteReleaseValues)) {
+      return;
+    }
+
+    persistFavoriteReleaseValues(nextValues);
+    setFavoriteReleaseValues(nextValues);
+  }, [favoriteReleaseValues, releaseListing]);
+
+  function toggleFavorite(download: BlenderReleaseDownload) {
+    setFavoriteReleaseValues((current) => {
+      const isFavorite = current.includes(download.version) || current.includes(download.id);
+      const next = isFavorite
+        ? current.filter((value) => value !== download.version && value !== download.id)
+        : uniqueFavoriteValues([...current.filter((value) => value !== download.id), download.version]);
+
+      persistFavoriteReleaseValues(next);
       return next;
     });
   }
 
-  function removeFavorite(downloadId: string) {
-    setFavoriteReleaseIds((current) => {
-      if (!current.includes(downloadId)) {
+  function removeFavorite(versionNumber: string) {
+    setFavoriteReleaseValues((current) => {
+      const next = current.filter((value) => value !== versionNumber);
+      if (haveSameValues(next, current)) {
         return current;
       }
 
-      const next = current.filter((id) => id !== downloadId);
-      persistFavoriteReleaseIds(next);
+      persistFavoriteReleaseValues(next);
       return next;
     });
   }
@@ -301,8 +438,29 @@ export default function App() {
       const nextLauncherState = await launchBlender({ id: version.id });
       setLauncherState(nextLauncherState);
       setReleaseError(null);
+      setHomeError(null);
     } catch (error) {
-      setReleaseError(readErrorMessage(error, `Could not launch Blender ${version.version ?? version.displayName}.`));
+      const message = readErrorMessage(error, `Could not launch Blender ${version.version ?? version.displayName}.`);
+      setReleaseError(message);
+      setHomeError(message);
+    }
+  }
+
+  async function openRecentProject(project: RecentProject) {
+    if (!project.exists) {
+      setHomeError(`The Blender file could not be found: ${project.filePath}`);
+      return;
+    }
+
+    try {
+      const nextLauncherState = await launchBlenderProject({
+        id: project.blenderId,
+        projectPath: project.filePath,
+      });
+      setLauncherState(nextLauncherState);
+      setHomeError(null);
+    } catch (error) {
+      setHomeError(readErrorMessage(error, `Could not open ${project.name}.`));
     }
   }
 
@@ -330,6 +488,11 @@ export default function App() {
     installedReleaseVersions.set(version.version, version);
   }
 
+  const favoriteReleaseVersions = favoriteReleaseValues.filter((value) => !isLegacyFavoriteReleaseId(value));
+  const favoriteInstalledVersions = favoriteReleaseVersions
+    .map((versionNumber) => installedReleaseVersions.get(versionNumber))
+    .filter((version): version is BlenderVersion => Boolean(version));
+
   async function confirmUninstall() {
     if (!pendingUninstallDownload) {
       return;
@@ -347,8 +510,11 @@ export default function App() {
     try {
       const nextLauncherState = await removeBlenderVersion(installedVersion.id);
       setLauncherState(nextLauncherState);
-      removeFavorite(pendingUninstallDownload.id);
+      removeFavorite(pendingUninstallDownload.version);
       setPendingUninstallDownload(null);
+      if (activePage === "home") {
+        void refreshHomePageData();
+      }
     } catch (error) {
       setRemoveVersionError(readErrorMessage(error, `Could not remove Blender ${pendingUninstallDownload.version}.`));
     } finally {
@@ -368,13 +534,21 @@ export default function App() {
         description={activeMeta.description}
       >
         {activePage === "home" ? (
-          <HomePage favoriteCount={favoriteReleaseIds.length} managedInstallCount={installedReleaseVersions.size} />
+          <HomePage
+            recentProjects={recentProjects}
+            favoriteVersions={favoriteInstalledVersions}
+            errorMessage={homeError}
+            onBrowseReleases={() => setActivePage("releases")}
+            onOpenProject={(project) => void openRecentProject(project)}
+            onLaunchVersion={(version) => void launchInstalledRelease(version)}
+          />
         ) : (
           <ReleasesPage
             releaseListing={releaseListing}
             releaseError={releaseError}
             isLoadingReleases={isLoadingReleases}
-            favoriteReleaseIds={favoriteReleaseIds}
+            favoriteVersionCount={favoriteReleaseVersions.length}
+            favoriteReleaseValues={favoriteReleaseValues}
             installStatuses={installStatuses}
             installedReleaseVersions={installedReleaseVersions}
             onRefresh={() => void refreshReleasePageData()}
@@ -410,3 +584,13 @@ export default function App() {
     </>
   );
 }
+
+
+
+
+
+
+
+
+
+
