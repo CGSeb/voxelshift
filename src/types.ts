@@ -28,9 +28,17 @@ export interface BlenderReleaseDownload {
   url: string;
 }
 
-export interface BlenderReleaseListing {
+export interface BlenderExperimentalReleaseGroup {
+  platformKey: string;
   platformLabel: string;
   downloads: BlenderReleaseDownload[];
+}
+
+export interface BlenderReleaseListing {
+  platformLabel: string;
+  stableDownloads: BlenderReleaseDownload[];
+  experimentalGroups: BlenderExperimentalReleaseGroup[];
+  experimentalError: string | null;
 }
 
 export interface BlenderReleaseInstallProgress {

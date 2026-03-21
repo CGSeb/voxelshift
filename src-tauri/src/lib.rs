@@ -21,6 +21,8 @@ const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
 #[cfg(target_os = "linux")]
 const BLENDER_EXECUTABLE_NAME: &str = "blender";
 const BLENDER_RELEASE_INDEX_URL: &str = "https://download.blender.org/release/";
+const BLENDER_DAILY_BUILDS_URL: &str = "https://builder.blender.org/download/daily/";
+const BLENDER_BUILDER_CDN_URL: &str = "https://cdn.builder.blender.org/";
 const RELEASE_INSTALL_EVENT: &str = "release-install-progress";
 const VOXELSHIFT_DIR_NAME: &str = "VoxelShift";
 const STABLE_INSTALL_DIR_NAME: &str = "stable";
@@ -68,6 +70,8 @@ struct LauncherState {
 struct ReleasePlatform {
     file_suffix: &'static str,
     label: &'static str,
+    os_tokens: &'static [&'static str],
+    arch_tokens: &'static [&'static str],
 }
 
 #[derive(Clone, Debug)]
@@ -90,9 +94,19 @@ struct BlenderReleaseDownload {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BlenderReleaseListing {
+struct BlenderExperimentalReleaseGroup {
+    platform_key: String,
     platform_label: String,
     downloads: Vec<BlenderReleaseDownload>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlenderReleaseListing {
+    platform_label: String,
+    stable_downloads: Vec<BlenderReleaseDownload>,
+    experimental_groups: Vec<BlenderExperimentalReleaseGroup>,
+    experimental_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -264,7 +278,7 @@ async fn get_blender_release_downloads() -> Result<BlenderReleaseListing, String
     let client = reqwest::Client::new();
     let root_body = fetch_text(&client, BLENDER_RELEASE_INDEX_URL).await?;
     let channels = parse_blender_release_channels(&root_body);
-    let mut downloads = Vec::new();
+    let mut stable_downloads = Vec::new();
 
     for channel in channels {
         let folder_body = match fetch_text(&client, &channel.url).await {
@@ -272,28 +286,32 @@ async fn get_blender_release_downloads() -> Result<BlenderReleaseListing, String
             Err(_) => continue,
         };
 
-        downloads.extend(parse_release_downloads(
+        stable_downloads.extend(parse_release_downloads(
             &folder_body,
             &channel,
             platform.file_suffix,
         ));
     }
 
-    downloads.sort_by(|left, right| {
-        compare_version_values(&right.version, &left.version)
-            .then_with(|| right.channel.cmp(&left.channel))
-    });
+    sort_release_downloads(&mut stable_downloads);
 
-    if downloads.is_empty() {
+    if stable_downloads.is_empty() {
         return Err(format!(
             "No stable Blender downloads ending with {} were found.",
             platform.file_suffix
         ));
     }
 
+    let (experimental_groups, experimental_error) = match fetch_experimental_release_groups(&client).await {
+        Ok(groups) => (groups, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+
     Ok(BlenderReleaseListing {
         platform_label: platform.label.to_string(),
-        downloads,
+        stable_downloads,
+        experimental_groups,
+        experimental_error,
     })
 }
 
@@ -902,15 +920,410 @@ fn parse_release_download_href(
     })
 }
 
+async fn fetch_experimental_release_groups(
+    client: &reqwest::Client,
+) -> Result<Vec<BlenderExperimentalReleaseGroup>, String> {
+    let body = fetch_text(client, BLENDER_DAILY_BUILDS_URL).await?;
+    let groups = parse_experimental_release_groups(&body);
+
+    if groups.is_empty() {
+        return Err("No x64 experimental daily builds were found on builder.blender.org.".to_string());
+    }
+
+    Ok(groups)
+}
+
+fn parse_experimental_release_groups(body: &str) -> Vec<BlenderExperimentalReleaseGroup> {
+    let lines = extract_html_text_lines_with_downloads(body);
+    let mut grouped_downloads = BTreeMap::<String, (String, BTreeMap<String, BlenderReleaseDownload>)>::new();
+    let mut pending_version: Option<String> = None;
+    let mut pending_channel: Option<String> = None;
+    let mut pending_release_date: Option<String> = None;
+    let mut pending_platform_key: Option<String> = None;
+    let mut pending_platform_label: Option<String> = None;
+
+    for line in lines {
+        if let Some((version, channel)) = parse_daily_release_heading(&line) {
+            pending_version = Some(version);
+            pending_channel = Some(channel);
+            pending_release_date = None;
+            pending_platform_key = None;
+            pending_platform_label = None;
+            continue;
+        }
+
+        if pending_version.is_none() {
+            continue;
+        }
+
+        if pending_release_date.is_none() {
+            if is_daily_release_date_line(&line) {
+                pending_release_date = Some(line);
+            }
+            continue;
+        }
+
+        if pending_platform_key.is_none() {
+            if let Some((platform_key, platform_label)) = parse_experimental_platform_line(&line) {
+                pending_platform_key = Some(platform_key.to_string());
+                pending_platform_label = Some(platform_label.to_string());
+            }
+            continue;
+        }
+
+        let Some(url) = line.strip_prefix("DOWNLOAD_URL::") else {
+            continue;
+        };
+
+        let version = match pending_version.take() {
+            Some(value) => value,
+            None => continue,
+        };
+        let channel = match pending_channel.take() {
+            Some(value) => value,
+            None => continue,
+        };
+        let release_date = pending_release_date.take().unwrap_or_default();
+        let platform_key = match pending_platform_key.take() {
+            Some(value) => value,
+            None => continue,
+        };
+        let platform_label = match pending_platform_label.take() {
+            Some(value) => value,
+            None => continue,
+        };
+
+        if channel.eq_ignore_ascii_case("stable") {
+            continue;
+        }
+
+        let Some(download) = make_experimental_release_download(&version, &channel, &release_date, url) else {
+            continue;
+        };
+
+        let (_, downloads) = grouped_downloads
+            .entry(platform_key)
+            .or_insert_with(|| (platform_label, BTreeMap::new()));
+        downloads.entry(download.id.clone()).or_insert(download);
+    }
+
+    let mut groups = grouped_downloads
+        .into_iter()
+        .map(|(platform_key, (platform_label, downloads))| {
+            let mut downloads: Vec<_> = downloads.into_values().collect();
+            sort_release_downloads(&mut downloads);
+            BlenderExperimentalReleaseGroup {
+                platform_key,
+                platform_label,
+                downloads,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    groups.sort_by(|left, right| {
+        experimental_platform_rank(&left.platform_key)
+            .cmp(&experimental_platform_rank(&right.platform_key))
+            .then_with(|| left.platform_label.cmp(&right.platform_label))
+    });
+
+    groups
+}
+
+fn make_experimental_release_download(
+    version: &str,
+    channel: &str,
+    release_date: &str,
+    url: &str,
+) -> Option<BlenderReleaseDownload> {
+    let file_name = url.split('?').next()?.split('/').next_back()?.trim();
+
+    if file_name.is_empty() || !is_supported_release_archive(file_name) {
+        return None;
+    }
+
+    Some(BlenderReleaseDownload {
+        id: make_release_id(url),
+        channel: channel.to_string(),
+        version: version.to_string(),
+        file_name: file_name.to_string(),
+        release_date: release_date.to_string(),
+        url: url.to_string(),
+    })
+}
+
+fn parse_daily_release_heading(line: &str) -> Option<(String, String)> {
+    let normalized = normalize_whitespace(line);
+    let mut parts = normalized.split_whitespace();
+
+    if parts.next()? != "Blender" {
+        return None;
+    }
+
+    let version = parts.next()?.to_string();
+    let mut channel_parts = Vec::new();
+
+    for token in parts {
+        if token.eq_ignore_ascii_case("SHA") {
+            break;
+        }
+
+        if looks_like_reference_hash(token) && !channel_parts.is_empty() {
+            break;
+        }
+
+        channel_parts.push(token);
+    }
+
+    if channel_parts.is_empty() {
+        return None;
+    }
+
+    Some((version, channel_parts.join(" ")))
+}
+
+fn parse_experimental_platform_line(line: &str) -> Option<(&'static str, &'static str)> {
+    let normalized = line.to_ascii_lowercase();
+
+    if normalized.contains("windows") && normalized.contains("x64") {
+        Some(("windows", "Windows x64"))
+    } else if normalized.contains("linux") && normalized.contains("x64") {
+        Some(("linux", "Linux x64"))
+    } else if normalized.contains("macos") && (normalized.contains("intel") || normalized.contains("x64")) {
+        Some(("macos", "macOS x64"))
+    } else {
+        None
+    }
+}
+
+fn experimental_platform_rank(platform_key: &str) -> usize {
+    match platform_key {
+        "windows" => 0,
+        "linux" => 1,
+        "macos" => 2,
+        _ => 99,
+    }
+}
+
+fn is_daily_release_date_line(line: &str) -> bool {
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    parts.len() >= 2
+        && parts[0].chars().all(|character| character.is_ascii_digit())
+        && is_month_token(parts[1])
+}
+
+fn is_month_token(token: &str) -> bool {
+    matches!(
+        token,
+        "Jan" | "Feb" | "Mar" | "Apr" | "May" | "Jun" | "Jul" | "Aug" | "Sep" | "Oct" | "Nov" | "Dec"
+    )
+}
+
+fn looks_like_reference_hash(token: &str) -> bool {
+    token.len() >= 7 && token.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn extract_html_text_lines_with_downloads(body: &str) -> Vec<String> {
+    let lower = body.to_ascii_lowercase();
+    let mut output = String::new();
+    let mut index = 0usize;
+    let mut ignored_tag: Option<String> = None;
+    let mut anchor_href: Option<String> = None;
+    let mut anchor_text = String::new();
+
+    while index < body.len() {
+        let rest = &body[index..];
+
+        if rest.starts_with('<') {
+            let Some(tag_end) = rest.find('>') else {
+                break;
+            };
+            let tag_inner = &body[index + 1..index + tag_end];
+            let tag_inner_lower = &lower[index + 1..index + tag_end];
+            let trimmed_original = tag_inner.trim();
+            let trimmed_lower = tag_inner_lower.trim();
+            let is_end_tag = trimmed_lower.starts_with('/');
+            let tag_name = parse_html_tag_name(trimmed_lower);
+
+            if let Some(ignored) = ignored_tag.as_deref() {
+                if is_end_tag && tag_name == ignored {
+                    ignored_tag = None;
+                    if is_line_break_tag(tag_name) {
+                        output.push('\n');
+                    }
+                }
+                index += tag_end + 1;
+                continue;
+            }
+
+            if !is_end_tag && matches!(tag_name, "script" | "style") {
+                ignored_tag = Some(tag_name.to_string());
+                index += tag_end + 1;
+                continue;
+            }
+
+            if !is_end_tag && tag_name == "a" {
+                anchor_href = extract_href_attribute(trimmed_original);
+                anchor_text.clear();
+            } else if is_end_tag && tag_name == "a" {
+                let text = normalize_whitespace(&anchor_text);
+                if !text.is_empty() {
+                    if text.eq_ignore_ascii_case("Download") {
+                        if let Some(href) = anchor_href.as_deref() {
+                            if let Some(url) = resolve_download_url(href) {
+                                output.push('\n');
+                                output.push_str("DOWNLOAD_URL::");
+                                output.push_str(&url);
+                                output.push('\n');
+                            }
+                        }
+                    } else {
+                        if output.chars().last().map(|character| !character.is_whitespace()).unwrap_or(false) {
+                            output.push(' ');
+                        }
+                        output.push_str(&text);
+                        output.push(' ');
+                    }
+                }
+                anchor_href = None;
+                anchor_text.clear();
+            }
+
+            if is_line_break_tag(tag_name) {
+                output.push('\n');
+            }
+
+            index += tag_end + 1;
+            continue;
+        }
+
+        let next_tag = rest.find('<').map(|offset| index + offset).unwrap_or(body.len());
+        let fragment = decode_html_entities(&body[index..next_tag]);
+
+        if anchor_href.is_some() {
+            anchor_text.push_str(&fragment);
+        } else {
+            output.push_str(&fragment);
+        }
+
+        index = next_tag;
+    }
+
+    output
+        .lines()
+        .map(normalize_whitespace)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn parse_html_tag_name(tag_content: &str) -> &str {
+    tag_content
+        .trim_start_matches('/')
+        .split(|character: char| character.is_whitespace() || character == '/')
+        .next()
+        .unwrap_or_default()
+}
+
+fn is_line_break_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "article"
+            | "aside"
+            | "br"
+            | "div"
+            | "footer"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "li"
+            | "main"
+            | "nav"
+            | "p"
+            | "section"
+            | "table"
+            | "tbody"
+            | "td"
+            | "th"
+            | "thead"
+            | "tr"
+            | "ul"
+    )
+}
+
+fn extract_href_attribute(tag_content: &str) -> Option<String> {
+    let lower = tag_content.to_ascii_lowercase();
+    let href_start = lower.find("href=")? + 5;
+    let raw = &tag_content[href_start..].trim_start();
+    let quote = raw.chars().next()?;
+
+    if quote == '"' || quote == '\'' {
+        let value = &raw[1..];
+        let value_end = value.find(quote)?;
+        Some(value[..value_end].to_string())
+    } else {
+        let value_end = raw
+            .find(|character: char| character.is_whitespace() || character == '>')
+            .unwrap_or(raw.len());
+        Some(raw[..value_end].to_string())
+    }
+}
+
+fn resolve_download_url(href: &str) -> Option<String> {
+    let trimmed = href.trim();
+
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('?') {
+        return None;
+    }
+
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        Some(trimmed.to_string())
+    } else if trimmed.starts_with("//") {
+        Some(format!("https:{trimmed}"))
+    } else if trimmed.starts_with('/') {
+        Some(format!("https://builder.blender.org{trimmed}"))
+    } else {
+        Some(format!("{BLENDER_DAILY_BUILDS_URL}{}", trimmed.trim_start_matches("./")))
+    }
+}
+
+fn decode_html_entities(value: &str) -> String {
+    value
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sort_release_downloads(downloads: &mut [BlenderReleaseDownload]) {
+    downloads.sort_by(|left, right| {
+        compare_version_values(&right.version, &left.version)
+            .then_with(|| right.channel.cmp(&left.channel))
+            .then_with(|| right.release_date.cmp(&left.release_date))
+    });
+}
+
 fn current_release_platform() -> Option<ReleasePlatform> {
     match std::env::consts::OS {
         "windows" => Some(ReleasePlatform {
             file_suffix: "-windows-x64.zip",
             label: "Windows x64",
+            os_tokens: &["windows"],
+            arch_tokens: &["x64", "amd64", "x86_64"],
         }),
         "linux" => Some(ReleasePlatform {
             file_suffix: "-linux-x64.tar.xz",
             label: "Linux x64",
+            os_tokens: &["linux"],
+            arch_tokens: &["x64", "amd64", "x86_64"],
         }),
         _ => None,
     }
@@ -1090,6 +1503,26 @@ fn is_supported_release_archive(file_name: &str) -> bool {
     is_zip_archive(file_name) || is_tar_xz_archive(file_name)
 }
 
+fn is_official_blender_download_url(url: &str) -> bool {
+    url.starts_with(BLENDER_RELEASE_INDEX_URL)
+        || url.starts_with(BLENDER_DAILY_BUILDS_URL)
+        || url.starts_with(BLENDER_BUILDER_CDN_URL)
+}
+
+fn file_name_matches_platform(file_name: &str, platform: &ReleasePlatform) -> bool {
+    let normalized = file_name.to_ascii_lowercase();
+    let matches_os = platform
+        .os_tokens
+        .iter()
+        .any(|token| normalized.contains(token));
+    let matches_arch = platform
+        .arch_tokens
+        .iter()
+        .any(|token| normalized.contains(token));
+
+    matches_os && matches_arch && is_supported_release_archive(file_name)
+}
+
 fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), String> {
     let platform = current_release_platform().ok_or_else(|| {
         format!(
@@ -1107,11 +1540,11 @@ fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), Strin
         return Err("The release file name is missing.".to_string());
     }
 
-    if !request.url.starts_with(BLENDER_RELEASE_INDEX_URL) {
-        return Err("Only official Blender release downloads can be installed automatically.".to_string());
+    if !is_official_blender_download_url(request.url.trim()) {
+        return Err("Only official Blender downloads from blender.org can be installed automatically.".to_string());
     }
 
-    if !request.file_name.ends_with(platform.file_suffix) {
+    if !file_name_matches_platform(&request.file_name, &platform) {
         return Err(format!(
             "This release does not match the current platform: {}.",
             platform.label
@@ -1776,5 +2209,4 @@ fn path_to_string(path: &Path) -> String {
 fn eq_ignore_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
-
 
