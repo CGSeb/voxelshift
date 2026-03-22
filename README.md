@@ -1,49 +1,81 @@
 # Voxel Shift
 
-Voxel Shift is a Tauri + React desktop launcher for managing Blender installs and opening projects with the Blender version they were created in.
+Voxel Shift is an open source desktop launcher for Blender, built with Tauri, React, TypeScript, and Rust.
 
-## Product Direction
+It is aimed at artists and technical users who keep multiple Blender installs around and want one place to:
 
-The intended launcher flow is:
+- browse official Blender downloads
+- install managed Blender builds
+- launch the right Blender version quickly
+- keep favorite versions close at hand
+- reopen recent projects with the Blender build they came from
 
-- Home page
-  - Show recent projects with a thumbnail and project name.
-  - Clicking a recent project should launch the Blender version the project was created in.
-  - Show a second section for favorite Blender versions so common builds can be launched quickly.
-- Installed versions page
-  - Show every Blender version installed locally.
-  - Allow each version to be launched, marked as favorite, or deleted.
-- Available versions page
-  - Show Blender builds available to install from the official release mirror.
-  - Installing a version should download the portable archive and unzip it into `Documents/VoxelShift/stable`.
-  - The same Blender version must not be installable twice.
+## App Overview
 
-## Current Scope
+### Home
 
-Only the home page layout is implemented right now.
+- recent projects with thumbnail fallback handling
+- favorite Blender versions with launch shortcuts
+- version status badges such as `Default` and `LTS`
 
-- Recent projects are shown as static placeholder cards.
-- Favorite Blender versions are shown as static placeholder cards.
-- Installed versions management, downloads, deletion, favorites persistence, project detection, and Blender launching are not implemented yet.
-
-## Stack
+## Tech Stack
 
 - Tauri 2
 - React 19
 - TypeScript
 - Vite
-- Rust backend for native launcher capabilities
+- Rust backend for filesystem, process launching, install management, and release parsing
 
 ## Local Development
+
+### Prerequisites
+
+- Node.js and npm
+- Rust toolchain
+- Tauri system prerequisites for your OS
+
+### Run The App
 
 ```powershell
 npm.cmd install
 npm.cmd run tauri dev
 ```
 
-## Build
+### Frontend Build
 
 ```powershell
-npm.cmd install
+npm.cmd run build
+```
+
+### Desktop Build
+
+```powershell
 npm.cmd run tauri build
 ```
+
+## Repository Layout
+
+- `src/` - React UI, page composition, styling, and Tauri API client calls
+- `src-tauri/` - Rust backend commands, Blender discovery, release parsing, download/install logic, and desktop packaging
+- `resources/` - bundled Blender extension resources used during managed installs
+
+## Roadmap
+
+Some of the next high-value improvements are:
+
+- test coverage for release parsing and launcher flows
+- packaging and release automation
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+If you open a bug report, it helps to include:
+
+- operating system
+- Blender version involved
+- reproduction steps
+
+## License
+
+Voxel Shift is licensed under GPL-3.0-or-later. See [LICENSE](LICENSE).

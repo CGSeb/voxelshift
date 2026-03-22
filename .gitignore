@@ -1,5 +1,7 @@
 node_modules/
+.tauri/
 dist/
+coverage/
 target/
 src-tauri/target/
 *.log
