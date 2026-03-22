@@ -1,6 +1,7 @@
 import { Play, Star } from "lucide-react";
-import { Tooltip } from "../Tooltip";
+import { isBlenderLtsVersion } from "../../lib/blenderVersions";
 import type { BlenderReleaseDownload, BlenderReleaseInstallProgress, BlenderVersion } from "../../types";
+import { Tooltip } from "../Tooltip";
 
 interface ReleaseRowProps {
   download: BlenderReleaseDownload;
@@ -80,6 +81,7 @@ export function ReleaseRow({
   const installedVersion = isCurrentPlatformList ? installedReleaseVersions.get(download.version) : undefined;
   const isInstalled = Boolean(installedVersion);
   const installStatus = isCurrentPlatformList ? installStatuses[download.id] : undefined;
+  const showLtsBadge = !isExperimentalList && isBlenderLtsVersion(download.version);
   const isInstalling = installStatus ? activeInstallPhases.includes(installStatus.phase) : false;
   const showInstallStatus = Boolean(installStatus) && installStatus?.phase !== "completed";
   const showProgressBar = installStatus ? activeInstallPhases.includes(installStatus.phase) : false;
@@ -96,7 +98,10 @@ export function ReleaseRow({
   return (
     <article className="release-row release-row-item">
       <div className="release-version-cell release-primary">
-        <strong>{download.version}</strong>
+        <div className="release-version-meta">
+          <strong>{download.version}</strong>
+          {showLtsBadge ? <span className="release-version-badge">LTS</span> : null}
+        </div>
       </div>
 
       <div className="release-channel-cell">

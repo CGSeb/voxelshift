@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
+import { isBlenderLtsVersion } from "../lib/blenderVersions";
 import type { BlenderVersion, RecentProject } from "../types";
 
 interface HomePageProps {
@@ -258,26 +259,37 @@ export function HomePage({
 
         <div className="home-row-track home-row-track-favorites" aria-label="Favorite Blender versions">
           {visibleFavoriteVersions.length > 0 ? (
-            visibleFavoriteVersions.map((version) => (
-              <article className="home-card home-card-version" key={version.id}>
-                <button
-                  className="home-card-button"
-                  type="button"
-                  onClick={() => onLaunchVersion(version)}
-                  disabled={!version.available}
-                  aria-label={version.available ? `Launch ${version.displayName}` : `${version.displayName} is unavailable`}
-                >
-                  <div className="home-card-copy home-card-copy-tight">
-                    {version.isDefault ? (
-                      <div className="home-card-header home-card-header-tight">
-                        <span className="home-card-status">Default</span>
-                      </div>
-                    ) : null}
-                    <h4 className="home-card-title">{version.displayName}</h4>
-                  </div>
-                </button>
-              </article>
-            ))
+            visibleFavoriteVersions.map((version) => {
+              const showLtsBadge = isBlenderLtsVersion(version.version);
+
+              return (
+                <article className="home-card home-card-version" key={version.id}>
+                  <button
+                    className="home-card-button"
+                    type="button"
+                    onClick={() => onLaunchVersion(version)}
+                    disabled={!version.available}
+                    aria-label={version.available ? `Launch ${version.displayName}` : `${version.displayName} is unavailable`}
+                  >
+                    <div className="home-card-copy home-card-copy-tight">
+                      {version.isDefault ? (
+                        <div className="home-card-header home-card-header-tight">
+                          <div className="home-card-pill-row">
+                            <span className="home-card-status">Default</span>
+                          </div>
+                        </div>
+                      ) : null}
+                      <h4 className="home-card-title">{version.displayName}</h4>
+                      {showLtsBadge ? (
+                        <div className="home-card-meta-row">
+                          <span className="home-card-status home-card-status-lts">LTS</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  </button>
+                </article>
+              );
+            })
           ) : (
             <article className="home-card home-empty-card">
               <p className="home-card-eyebrow">Favorite Versions</p>

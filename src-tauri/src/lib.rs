@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -258,6 +260,7 @@ impl ReleaseInstallControl {
 pub fn run() {
     tauri::Builder::default()
         .manage(ReleaseInstallControl::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if let (Some(window), Some(icon)) = (
                 app.get_webview_window("main"),
@@ -2370,3 +2373,51 @@ fn eq_ignore_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_major_minor_versions() {
+        assert!(is_major_minor_release("4.2"));
+        assert!(!is_major_minor_release("4.2.1"));
+        assert!(!is_major_minor_release("daily"));
+    }
+
+    #[test]
+    fn identifies_patch_versions() {
+        assert!(is_patch_release("4.2.3"));
+        assert!(!is_patch_release("4.2"));
+        assert!(!is_patch_release("4.2.beta"));
+    }
+
+    #[test]
+    fn extracts_versions_from_paths_and_labels() {
+        assert_eq!(
+            extract_version_like_segment("blender-4.2.3-windows-x64"),
+            Some("4.2.3".to_string())
+        );
+        assert_eq!(
+            infer_version_from_path(Path::new("/apps/Blender 3.6/blender")),
+            Some("3.6".to_string())
+        );
+    }
+
+    #[test]
+    fn compares_versions_using_numeric_segments() {
+        assert_eq!(compare_version_values("4.2.10", "4.2.9"), Ordering::Greater);
+        assert_eq!(compare_version_values("3.6.0", "4.0.0"), Ordering::Less);
+    }
+
+    #[test]
+    fn splits_command_lines_while_preserving_quoted_segments() {
+        assert_eq!(
+            split_command_line("\"C:\\Program Files\\Blender\\blender.exe\" --factory-startup"),
+            vec![
+                "C:\\Program Files\\Blender\\blender.exe".to_string(),
+                "--factory-startup".to_string()
+            ]
+        );
+    }
+}
