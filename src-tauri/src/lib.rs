@@ -5,14 +5,17 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, Window, WindowEvent};
+use tauri::{
+    path::BaseDirectory, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position,
+    Size, WebviewWindow, Window, WindowEvent,
+};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -387,10 +390,11 @@ async fn get_blender_release_downloads() -> Result<BlenderReleaseListing, String
         ));
     }
 
-    let (experimental_groups, experimental_error) = match fetch_experimental_release_groups(&client).await {
-        Ok(groups) => (groups, None),
-        Err(error) => (Vec::new(), Some(error)),
-    };
+    let (experimental_groups, experimental_error) =
+        match fetch_experimental_release_groups(&client).await {
+            Ok(groups) => (groups, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
 
     Ok(BlenderReleaseListing {
         platform_label: platform.label.to_string(),
@@ -409,11 +413,9 @@ async fn install_blender_release(
     validate_install_request(&request)?;
 
     let existing_state = build_launcher_state(&app)?;
-    if existing_state
-        .versions
-        .iter()
-        .any(|version| version.available && version.version.as_deref() == Some(request.version.as_str()))
-    {
+    if existing_state.versions.iter().any(|version| {
+        version.available && version.version.as_deref() == Some(request.version.as_str())
+    }) {
         return Err(format!("Blender {} is already installed.", request.version));
     }
 
@@ -430,8 +432,9 @@ async fn install_blender_release(
 
         fs::create_dir_all(&stable_dir)
             .map_err(|error| format!("Unable to prepare the stable install directory: {error}"))?;
-        fs::create_dir_all(&temp_dir)
-            .map_err(|error| format!("Unable to prepare the temporary install directory: {error}"))?;
+        fs::create_dir_all(&temp_dir).map_err(|error| {
+            format!("Unable to prepare the temporary install directory: {error}")
+        })?;
 
         let archive_path = temp_dir.join(&request.file_name);
 
@@ -449,7 +452,9 @@ async fn install_blender_release(
             },
         );
 
-        if let Err(error) = download_release_archive(&app, control.inner(), &request, &archive_path).await {
+        if let Err(error) =
+            download_release_archive(&app, control.inner(), &request, &archive_path).await
+        {
             let _ = fs::remove_dir_all(&temp_dir);
             let phase = if error == INSTALL_CANCELED_MESSAGE {
                 "canceled"
@@ -636,14 +641,7 @@ fn add_scan_root(app: AppHandle, path: String) -> Result<LauncherState, String> 
     let normalized_string = path_to_string(&normalized);
     let mut stored = load_stored_state(&app)?;
 
-    if !stored
-        .scan_roots
-        .iter()
-        .any(|root| eq_ignore_case(root, &normalized_string))
-    {
-        stored.scan_roots.push(normalized_string);
-        stored.scan_roots.sort_by_key(|root| root.to_lowercase());
-    }
+    add_scan_root_value(&mut stored.scan_roots, normalized_string);
 
     save_stored_state(&app, &stored)?;
     build_launcher_state(&app)
@@ -652,9 +650,7 @@ fn add_scan_root(app: AppHandle, path: String) -> Result<LauncherState, String> 
 #[tauri::command]
 fn remove_scan_root(app: AppHandle, path: String) -> Result<LauncherState, String> {
     let mut stored = load_stored_state(&app)?;
-    stored
-        .scan_roots
-        .retain(|root| !eq_ignore_case(root, &path));
+    remove_scan_root_value(&mut stored.scan_roots, &path);
     save_stored_state(&app, &stored)?;
     build_launcher_state(&app)
 }
@@ -663,15 +659,7 @@ fn remove_scan_root(app: AppHandle, path: String) -> Result<LauncherState, Strin
 fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherState, String> {
     let mut stored = load_stored_state(&app)?;
     let state = build_launcher_state(&app)?;
-    let version = state
-        .versions
-        .iter()
-        .find(|version| version.id == request.id)
-        .ok_or_else(|| "Could not find that Blender version.".to_string())?;
-
-    if !version.available {
-        return Err("That Blender executable is missing.".to_string());
-    }
+    let version = resolve_launch_version(&state.versions, &request.id)?;
 
     let args = request
         .extra_args
@@ -690,28 +678,14 @@ fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherStat
 }
 
 #[tauri::command]
-fn launch_blender_project(app: AppHandle, request: LaunchProjectRequest) -> Result<LauncherState, String> {
+fn launch_blender_project(
+    app: AppHandle,
+    request: LaunchProjectRequest,
+) -> Result<LauncherState, String> {
     let mut stored = load_stored_state(&app)?;
     let state = build_launcher_state(&app)?;
-    let version = state
-        .versions
-        .iter()
-        .find(|version| version.id == request.id)
-        .ok_or_else(|| "Could not find that Blender version.".to_string())?;
-
-    if !version.available {
-        return Err("That Blender executable is missing.".to_string());
-    }
-
-    let project_path = PathBuf::from(request.project_path.trim());
-
-    if request.project_path.trim().is_empty() {
-        return Err("The Blender project path is missing.".to_string());
-    }
-
-    if !project_path.exists() {
-        return Err("That Blender project file could not be found.".to_string());
-    }
+    let version = resolve_launch_version(&state.versions, &request.id)?;
+    let project_path = validate_project_launch_path(&request.project_path)?;
 
     Command::new(&version.executable_path)
         .arg(&project_path)
@@ -764,6 +738,18 @@ fn open_version_location(app: AppHandle, id: String) -> Result<(), String> {
 fn build_launcher_state(app: &AppHandle) -> Result<LauncherState, String> {
     let stored = load_stored_state(app)?;
     let discovered = discover_versions(app, &stored.scan_roots);
+    Ok(merge_launcher_state(
+        &stored,
+        discovered,
+        current_timestamp(),
+    ))
+}
+
+fn merge_launcher_state(
+    stored: &StoredState,
+    discovered: Vec<BlenderVersion>,
+    detected_at: u64,
+) -> LauncherState {
     let mut merged = BTreeMap::<String, BlenderVersion>::new();
 
     for version in discovered {
@@ -821,11 +807,11 @@ fn build_launcher_state(app: &AppHandle) -> Result<LauncherState, String> {
 
     versions.sort_by(version_sort);
 
-    Ok(LauncherState {
+    LauncherState {
         versions,
-        scan_roots: stored.scan_roots,
-        detected_at: current_timestamp(),
-    })
+        scan_roots: stored.scan_roots.clone(),
+        detected_at,
+    }
 }
 
 fn collect_recent_projects(versions: &[BlenderVersion]) -> Vec<RecentProject> {
@@ -987,7 +973,9 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, Strin
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("The request to {url} returned an unexpected status: {status}"));
+        return Err(format!(
+            "The request to {url} returned an unexpected status: {status}"
+        ));
     }
 
     response
@@ -1058,7 +1046,9 @@ fn parse_release_downloads(
             continue;
         };
 
-        if let Some(download) = parse_release_download_href(href, channel, file_suffix, &release_date) {
+        if let Some(download) =
+            parse_release_download_href(href, channel, file_suffix, &release_date)
+        {
             downloads.entry(download.id.clone()).or_insert(download);
         }
     }
@@ -1098,7 +1088,9 @@ fn parse_release_download_href(
         return None;
     }
 
-    let version = file_name.strip_prefix("blender-")?.strip_suffix(file_suffix)?;
+    let version = file_name
+        .strip_prefix("blender-")?
+        .strip_suffix(file_suffix)?;
     if !is_patch_release(version) {
         return None;
     }
@@ -1127,7 +1119,9 @@ async fn fetch_experimental_release_groups(
     let groups = parse_experimental_release_groups(&body);
 
     if groups.is_empty() {
-        return Err("No x64 experimental daily builds were found on builder.blender.org.".to_string());
+        return Err(
+            "No x64 experimental daily builds were found on builder.blender.org.".to_string(),
+        );
     }
 
     Ok(groups)
@@ -1135,7 +1129,8 @@ async fn fetch_experimental_release_groups(
 
 fn parse_experimental_release_groups(body: &str) -> Vec<BlenderExperimentalReleaseGroup> {
     let lines = extract_html_text_lines_with_downloads(body);
-    let mut grouped_downloads = BTreeMap::<String, (String, BTreeMap<String, BlenderReleaseDownload>)>::new();
+    let mut grouped_downloads =
+        BTreeMap::<String, (String, BTreeMap<String, BlenderReleaseDownload>)>::new();
     let mut pending_version: Option<String> = None;
     let mut pending_channel: Option<String> = None;
     let mut pending_release_date: Option<String> = None;
@@ -1197,7 +1192,9 @@ fn parse_experimental_release_groups(body: &str) -> Vec<BlenderExperimentalRelea
             continue;
         }
 
-        let Some(download) = make_experimental_release_download(&version, &channel, &release_date, url) else {
+        let Some(download) =
+            make_experimental_release_download(&version, &channel, &release_date, url)
+        else {
             continue;
         };
 
@@ -1288,7 +1285,9 @@ fn parse_experimental_platform_line(line: &str) -> Option<(&'static str, &'stati
         Some(("windows", "Windows x64"))
     } else if normalized.contains("linux") && normalized.contains("x64") {
         Some(("linux", "Linux x64"))
-    } else if normalized.contains("macos") && (normalized.contains("intel") || normalized.contains("x64")) {
+    } else if normalized.contains("macos")
+        && (normalized.contains("intel") || normalized.contains("x64"))
+    {
         Some(("macos", "macOS x64"))
     } else {
         None
@@ -1314,7 +1313,18 @@ fn is_daily_release_date_line(line: &str) -> bool {
 fn is_month_token(token: &str) -> bool {
     matches!(
         token,
-        "Jan" | "Feb" | "Mar" | "Apr" | "May" | "Jun" | "Jul" | "Aug" | "Sep" | "Oct" | "Nov" | "Dec"
+        "Jan"
+            | "Feb"
+            | "Mar"
+            | "Apr"
+            | "May"
+            | "Jun"
+            | "Jul"
+            | "Aug"
+            | "Sep"
+            | "Oct"
+            | "Nov"
+            | "Dec"
     )
 }
 
@@ -1377,7 +1387,12 @@ fn extract_html_text_lines_with_downloads(body: &str) -> Vec<String> {
                             }
                         }
                     } else {
-                        if output.chars().last().map(|character| !character.is_whitespace()).unwrap_or(false) {
+                        if output
+                            .chars()
+                            .last()
+                            .map(|character| !character.is_whitespace())
+                            .unwrap_or(false)
+                        {
                             output.push(' ');
                         }
                         output.push_str(&text);
@@ -1396,7 +1411,10 @@ fn extract_html_text_lines_with_downloads(body: &str) -> Vec<String> {
             continue;
         }
 
-        let next_tag = rest.find('<').map(|offset| index + offset).unwrap_or(body.len());
+        let next_tag = rest
+            .find('<')
+            .map(|offset| index + offset)
+            .unwrap_or(body.len());
         let fragment = decode_html_entities(&body[index..next_tag]);
 
         if anchor_href.is_some() {
@@ -1485,7 +1503,10 @@ fn resolve_download_url(href: &str) -> Option<String> {
     } else if trimmed.starts_with('/') {
         Some(format!("https://builder.blender.org{trimmed}"))
     } else {
-        Some(format!("{BLENDER_DAILY_BUILDS_URL}{}", trimmed.trim_start_matches("./")))
+        Some(format!(
+            "{BLENDER_DAILY_BUILDS_URL}{}",
+            trimmed.trim_start_matches("./")
+        ))
     }
 }
 
@@ -1558,9 +1579,9 @@ fn is_patch_release(version: &str) -> bool {
     };
 
     segments.next().is_none()
-        && [major, minor, patch]
-            .into_iter()
-            .all(|segment| !segment.is_empty() && segment.chars().all(|character| character.is_ascii_digit()))
+        && [major, minor, patch].into_iter().all(|segment| {
+            !segment.is_empty() && segment.chars().all(|character| character.is_ascii_digit())
+        })
 }
 
 fn is_version_at_least(version: &str, min_major: u32, min_minor: u32) -> bool {
@@ -1600,7 +1621,9 @@ fn normalize_blender_path(path: &str) -> Result<PathBuf, String> {
         .map(|name| !name.eq_ignore_ascii_case(BLENDER_EXECUTABLE_NAME))
         .unwrap_or(true)
     {
-        return Err("Please point to the Blender executable or a Blender install folder.".to_string());
+        return Err(
+            "Please point to the Blender executable or a Blender install folder.".to_string(),
+        );
     }
 
     candidate
@@ -1741,7 +1764,10 @@ fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), Strin
     }
 
     if !is_official_blender_download_url(request.url.trim()) {
-        return Err("Only official Blender downloads from blender.org can be installed automatically.".to_string());
+        return Err(
+            "Only official Blender downloads from blender.org can be installed automatically."
+                .to_string(),
+        );
     }
 
     if !file_name_matches_platform(&request.file_name, &platform) {
@@ -1752,7 +1778,10 @@ fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), Strin
     }
 
     if !is_supported_release_archive(&request.file_name) {
-        return Err("Automatic installs currently support .zip and .tar.xz Blender releases only.".to_string());
+        return Err(
+            "Automatic installs currently support .zip and .tar.xz Blender releases only."
+                .to_string(),
+        );
     }
 
     Ok(())
@@ -1817,7 +1846,8 @@ async fn download_release_archive(
             let elapsed_seconds = started_at.elapsed().as_secs_f64().max(0.001);
             let speed_bytes_per_second = downloaded_bytes as f64 / elapsed_seconds;
             let progress_percent = total_bytes.map(|total| {
-                ((downloaded_bytes as f64 / total as f64).clamp(0.0, 1.0)) * DOWNLOAD_PROGRESS_WEIGHT
+                ((downloaded_bytes as f64 / total as f64).clamp(0.0, 1.0))
+                    * DOWNLOAD_PROGRESS_WEIGHT
             });
 
             emit_release_install_progress(
@@ -1891,9 +1921,18 @@ async fn extract_release_archive(
         if is_zip_archive(&request.file_name) {
             extract_zip_release_archive(&app, &control, &request, &archive_path, &extraction_dir)?;
         } else if is_tar_xz_archive(&request.file_name) {
-            extract_tar_xz_release_archive(&app, &control, &request, &archive_path, &extraction_dir)?;
+            extract_tar_xz_release_archive(
+                &app,
+                &control,
+                &request,
+                &archive_path,
+                &extraction_dir,
+            )?;
         } else {
-            return Err("Automatic installs currently support .zip and .tar.xz Blender releases only.".to_string());
+            return Err(
+                "Automatic installs currently support .zip and .tar.xz Blender releases only."
+                    .to_string(),
+            );
         }
 
         if control.is_cancel_requested(&request.id)? {
@@ -1927,9 +1966,10 @@ fn extract_zip_release_archive(
         let mut entry = archive
             .by_index(index)
             .map_err(|error| format!("Unable to read an archive entry: {error}"))?;
-        let relative_path = entry.enclosed_name().map(Path::to_path_buf).ok_or_else(|| {
-            format!("The archive entry '{}' has an invalid path.", entry.name())
-        })?;
+        let relative_path = entry
+            .enclosed_name()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| format!("The archive entry '{}' has an invalid path.", entry.name()))?;
         let output_path = extraction_dir.join(relative_path);
 
         if entry.is_dir() {
@@ -1954,8 +1994,7 @@ fn extract_zip_release_archive(
                 release_id: request.id.clone(),
                 phase: "extracting".to_string(),
                 progress_percent: Some(
-                    DOWNLOAD_PROGRESS_WEIGHT
-                        + extract_ratio * (100.0 - DOWNLOAD_PROGRESS_WEIGHT),
+                    DOWNLOAD_PROGRESS_WEIGHT + extract_ratio * (100.0 - DOWNLOAD_PROGRESS_WEIGHT),
                 ),
                 downloaded_bytes: 0,
                 total_bytes: None,
@@ -2013,16 +2052,21 @@ fn extract_tar_xz_release_archive(
                 return Err(INSTALL_CANCELED_MESSAGE.to_string());
             }
 
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("Unable to monitor tar while extracting {}: {error}", request.file_name))?
-            {
+            if let Some(status) = child.try_wait().map_err(|error| {
+                format!(
+                    "Unable to monitor tar while extracting {}: {error}",
+                    request.file_name
+                )
+            })? {
                 let mut stderr_output = String::new();
                 if let Some(mut stderr) = child.stderr.take() {
                     let mut buffer = Vec::new();
-                    stderr
-                        .read_to_end(&mut buffer)
-                        .map_err(|error| format!("Unable to read tar output for {}: {error}", request.file_name))?;
+                    stderr.read_to_end(&mut buffer).map_err(|error| {
+                        format!(
+                            "Unable to read tar output for {}: {error}",
+                            request.file_name
+                        )
+                    })?;
                     stderr_output = String::from_utf8_lossy(&buffer).trim().to_string();
                 }
 
@@ -2087,17 +2131,21 @@ fn finalize_extracted_release(
     }
 
     if archive_root == extraction_dir {
-        fs::rename(extraction_dir, &final_install_dir)
-            .map_err(|error| format!("Unable to move the installed Blender files into place: {error}"))?;
+        fs::rename(extraction_dir, &final_install_dir).map_err(|error| {
+            format!("Unable to move the installed Blender files into place: {error}")
+        })?;
     } else {
-        fs::rename(&archive_root, &final_install_dir)
-            .map_err(|error| format!("Unable to move the installed Blender folder into place: {error}"))?;
+        fs::rename(&archive_root, &final_install_dir).map_err(|error| {
+            format!("Unable to move the installed Blender folder into place: {error}")
+        })?;
     }
 
     let executable = scan_for_blender_executables(&final_install_dir, MAX_SCAN_DEPTH)
         .into_iter()
         .next()
-        .ok_or_else(|| "The downloaded archive did not contain the Blender executable.".to_string())?;
+        .ok_or_else(|| {
+            "The downloaded archive did not contain the Blender executable.".to_string()
+        })?;
 
     if !executable.exists() {
         return Err("The extracted Blender executable could not be found.".to_string());
@@ -2110,7 +2158,10 @@ fn emit_release_install_progress(app: &AppHandle, progress: ReleaseInstallProgre
     let _ = app.emit(RELEASE_INSTALL_EVENT, progress);
 }
 
-fn install_voxel_shift_extension(app: &AppHandle, blender_install_dir: &Path) -> Result<(), String> {
+fn install_voxel_shift_extension(
+    app: &AppHandle,
+    blender_install_dir: &Path,
+) -> Result<(), String> {
     let extension_dir = blender_install_dir.join(BLENDER_EXTENSION_DIR);
     fs::create_dir_all(&extension_dir).map_err(|error| {
         format!(
@@ -2131,7 +2182,6 @@ fn install_voxel_shift_extension(app: &AppHandle, blender_install_dir: &Path) ->
             )
         })?;
     }
-
 
     enable_voxel_shift_extension(blender_install_dir)?;
     Ok(())
@@ -2204,10 +2254,11 @@ fn resolve_extension_resource_path(app: &AppHandle, file_name: &str) -> Result<P
 }
 
 fn release_folder_name(file_name: &str) -> String {
-    file_name
+    let trimmed = file_name.trim();
+
+    trimmed
         .trim_end_matches(".tar.xz")
         .trim_end_matches(".zip")
-        .trim()
         .to_string()
 }
 
@@ -2294,8 +2345,8 @@ fn load_window_state(app: &AppHandle) -> Result<Option<StoredWindowState>, Strin
         return Ok(None);
     }
 
-    let contents =
-        fs::read_to_string(&file_path).map_err(|error| format!("Unable to read window state: {error}"))?;
+    let contents = fs::read_to_string(&file_path)
+        .map_err(|error| format!("Unable to read window state: {error}"))?;
 
     let state = serde_json::from_str(&contents)
         .map_err(|error| format!("Unable to parse window state file: {error}"))?;
@@ -2360,7 +2411,9 @@ fn restore_window_state(window: &WebviewWindow) -> Result<(), String> {
 
     if let Some(position) = state.position {
         window
-            .set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
+            .set_position(Position::Physical(PhysicalPosition::new(
+                position.x, position.y,
+            )))
             .map_err(|error| format!("Unable to restore window position: {error}"))?;
     }
 
@@ -2511,10 +2564,124 @@ fn eq_ignore_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+fn add_scan_root_value(scan_roots: &mut Vec<String>, root: String) -> bool {
+    if scan_roots
+        .iter()
+        .any(|current| eq_ignore_case(current, &root))
+    {
+        return false;
+    }
 
+    scan_roots.push(root);
+    scan_roots.sort_by_key(|value| value.to_lowercase());
+    true
+}
+
+fn remove_scan_root_value(scan_roots: &mut Vec<String>, root: &str) -> bool {
+    let initial_len = scan_roots.len();
+    scan_roots.retain(|current| !eq_ignore_case(current, root));
+    scan_roots.len() != initial_len
+}
+
+fn resolve_launch_version<'a>(
+    versions: &'a [BlenderVersion],
+    id: &str,
+) -> Result<&'a BlenderVersion, String> {
+    let version = versions
+        .iter()
+        .find(|version| version.id == id)
+        .ok_or_else(|| "Could not find that Blender version.".to_string())?;
+
+    if !version.available {
+        return Err("That Blender executable is missing.".to_string());
+    }
+
+    Ok(version)
+}
+
+fn validate_project_launch_path(project_path: &str) -> Result<PathBuf, String> {
+    if project_path.trim().is_empty() {
+        return Err("The Blender project path is missing.".to_string());
+    }
+
+    let path = PathBuf::from(project_path.trim());
+    if !path.exists() {
+        return Err("That Blender project file could not be found.".to_string());
+    }
+
+    Ok(path)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = env::temp_dir().join(format!("voxel-shift-{prefix}-{unique}"));
+            fs::create_dir_all(&path).expect("test temp dir should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn make_version(
+        display_name: &str,
+        version: Option<&str>,
+        available: bool,
+        is_default: bool,
+    ) -> BlenderVersion {
+        BlenderVersion {
+            id: format!("id-{display_name}"),
+            display_name: display_name.to_string(),
+            version: version.map(|value| value.to_string()),
+            executable_path: format!("/apps/{display_name}/blender"),
+            install_dir: format!("/apps/{display_name}"),
+            source: VersionSource::Manual,
+            available,
+            is_default,
+            last_launched_at: None,
+        }
+    }
+
+    fn make_installed_version(
+        id: &str,
+        display_name: &str,
+        version: Option<&str>,
+        install_dir: &Path,
+        available: bool,
+    ) -> BlenderVersion {
+        BlenderVersion {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            version: version.map(|value| value.to_string()),
+            executable_path: path_to_string(&install_dir.join(BLENDER_EXECUTABLE_NAME)),
+            install_dir: path_to_string(install_dir),
+            source: VersionSource::Manual,
+            available,
+            is_default: false,
+            last_launched_at: None,
+        }
+    }
 
     #[test]
     fn identifies_major_minor_versions() {
@@ -2531,6 +2698,171 @@ mod tests {
     }
 
     #[test]
+    fn parses_release_channels_from_relative_and_absolute_urls() {
+        let body = r#"
+            <a href="Blender4.1/">Blender 4.1</a>
+            <a href="./Blender4.2/">Blender 4.2</a>
+            <a href="https://download.blender.org/release/Blender4.2/">duplicate</a>
+            <a href="Blender2.93/">legacy</a>
+        "#;
+
+        let channels = parse_blender_release_channels(body);
+        let versions = channels
+            .iter()
+            .map(|channel| channel.version.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(versions, vec!["4.2", "4.1"]);
+        assert_eq!(
+            channels[0].url,
+            "https://download.blender.org/release/Blender4.2/"
+        );
+        assert!(parse_release_channel_href("#ignored").is_none());
+    }
+
+    #[test]
+    fn parses_release_downloads_and_sorts_latest_versions_first() {
+        let channel = BlenderReleaseChannel {
+            name: "Blender4.2".to_string(),
+            version: "4.2".to_string(),
+            url: "https://download.blender.org/release/Blender4.2/".to_string(),
+        };
+        let body = r#"
+            <a href="blender-4.2.3-windows-x64.zip">ok</a> 2026-03-20
+            <a href="blender-4.2.10-windows-x64.zip">ok</a> 2026-03-22
+            <a href="blender-4.2-windows-x64.zip">bad</a> 2026-03-19
+            <a href="blender-4.3.0-windows-x64.zip">wrong channel</a> 2026-03-21
+            <a href="blender-4.2.10-windows-x64.zip">duplicate</a> 2026-03-22
+        "#;
+
+        let mut downloads = parse_release_downloads(body, &channel, "-windows-x64.zip");
+        sort_release_downloads(&mut downloads);
+
+        assert_eq!(downloads.len(), 2);
+        assert_eq!(downloads[0].version, "4.2.10");
+        assert_eq!(downloads[1].version, "4.2.3");
+        assert_eq!(downloads[0].id, make_release_id(&downloads[0].url));
+        assert_eq!(
+            parse_directory_listing_line(
+                r#"<a href="./blender-4.2.3-windows-x64.zip">zip</a> 2026-03-20 12:00"#
+            ),
+            Some(("./blender-4.2.3-windows-x64.zip", "2026-03-20".to_string()))
+        );
+        assert!(parse_release_download_href(
+            "?ignored",
+            &channel,
+            "-windows-x64.zip",
+            "2026-03-20"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn extracts_experimental_release_groups_from_html() {
+        let body = r#"
+            <section>
+              <h3>Blender 4.4.0 Alpha 1a2b3c4</h3>
+              <p>12 Mar 2026</p>
+              <p>Windows x64</p>
+              <a href="/download/daily/blender-4.4.0-alpha.1a2b3c4-windows-x64.zip">Download</a>
+              <h3>Blender 4.4.0 Alpha 1a2b3c4</h3>
+              <p>12 Mar 2026</p>
+              <p>Linux x64</p>
+              <a href="https://builder.blender.org/download/daily/blender-4.4.0-alpha.1a2b3c4-linux-x64.tar.xz">Download</a>
+              <h3>Blender 4.4.0 Stable 1a2b3c4</h3>
+              <p>12 Mar 2026</p>
+              <p>Windows x64</p>
+              <a href="/download/daily/blender-4.4.0-stable.1a2b3c4-windows-x64.zip">Download</a>
+            </section>
+        "#;
+
+        let groups = parse_experimental_release_groups(body);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].platform_key, "windows");
+        assert_eq!(groups[0].downloads[0].channel, "Alpha");
+        assert!(groups[0].downloads[0].url.contains("windows-x64.zip"));
+        assert_eq!(groups[1].platform_key, "linux");
+        assert!(groups[1].downloads[0].url.contains("linux-x64.tar.xz"));
+        assert_eq!(
+            make_experimental_release_download(
+                "4.4.0",
+                "Alpha",
+                "12 Mar 2026",
+                "https://builder.blender.org/download/daily/blender-4.4.0-alpha-windows-x64.zip?x=1"
+            )
+            .unwrap()
+            .file_name,
+            "blender-4.4.0-alpha-windows-x64.zip"
+        );
+        assert!(make_experimental_release_download(
+            "4.4.0",
+            "Alpha",
+            "12 Mar 2026",
+            "https://builder.blender.org/download/daily/blender-4.4.0-alpha-windows-x64.dmg"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parses_daily_build_and_html_helpers() {
+        assert_eq!(
+            parse_daily_release_heading("Blender 4.4.0 Alpha 1a2b3c4"),
+            Some(("4.4.0".to_string(), "Alpha".to_string()))
+        );
+        assert_eq!(
+            parse_daily_release_heading("Blender 4.4.0 Beta SHA 1a2b3c4"),
+            Some(("4.4.0".to_string(), "Beta".to_string()))
+        );
+        assert_eq!(
+            parse_experimental_platform_line("macOS Intel x64"),
+            Some(("macos", "macOS x64"))
+        );
+        assert!(is_daily_release_date_line("12 Mar 2026"));
+        assert!(!is_daily_release_date_line("Mar 12 2026"));
+        assert!(is_month_token("Mar"));
+        assert!(looks_like_reference_hash("1a2b3c4"));
+        assert_eq!(parse_html_tag_name("div class=\"panel\""), "div");
+        assert!(is_line_break_tag("section"));
+        assert_eq!(
+            extract_href_attribute("a href=\"/download/daily/file.zip\" class=\"download\""),
+            Some("/download/daily/file.zip".to_string())
+        );
+        assert_eq!(
+            resolve_download_url("//cdn.builder.blender.org/file.zip"),
+            Some("https://cdn.builder.blender.org/file.zip".to_string())
+        );
+        assert_eq!(
+            resolve_download_url("relative/file.zip"),
+            Some("https://builder.blender.org/download/daily/relative/file.zip".to_string())
+        );
+        assert_eq!(
+            decode_html_entities("A&nbsp;&amp;&nbsp;B"),
+            "A & B".to_string()
+        );
+        assert_eq!(
+            normalize_whitespace(" Blender\n  4.4.0 \t Alpha "),
+            "Blender 4.4.0 Alpha"
+        );
+
+        let lines = extract_html_text_lines_with_downloads(
+            r#"
+                <style>.skip { color: red; }</style>
+                <script>ignored()</script>
+                <section>
+                  <p>Blender&nbsp;4.4.0 &amp; More</p>
+                  <a href="/download/daily/file.zip">Download</a>
+                </section>
+            "#,
+        );
+
+        assert!(lines.contains(&"Blender 4.4.0 & More".to_string()));
+        assert!(lines.iter().any(
+            |line| line == "DOWNLOAD_URL::https://builder.blender.org/download/daily/file.zip"
+        ));
+    }
+
+    #[test]
     fn extracts_versions_from_paths_and_labels() {
         assert_eq!(
             extract_version_like_segment("blender-4.2.3-windows-x64"),
@@ -2540,12 +2872,352 @@ mod tests {
             infer_version_from_path(Path::new("/apps/Blender 3.6/blender")),
             Some("3.6".to_string())
         );
+        assert_eq!(
+            default_display_name(Path::new("/apps/Custom Build/blender")),
+            "Custom Build".to_string()
+        );
+    }
+
+    #[test]
+    fn scans_for_blender_executables_respecting_depth() {
+        let sandbox = TestDir::new("scan-executables");
+        let shallow_dir = sandbox.path().join("Blender 4.2");
+        let deep_dir = sandbox
+            .path()
+            .join("nested")
+            .join("deeper")
+            .join("too-deep");
+        fs::create_dir_all(&shallow_dir).unwrap();
+        fs::create_dir_all(&deep_dir).unwrap();
+        fs::write(shallow_dir.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
+        fs::write(deep_dir.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
+
+        let executables = scan_for_blender_executables(sandbox.path(), 3);
+        let paths = executables
+            .iter()
+            .map(|path| path_to_string(path))
+            .collect::<Vec<_>>();
+
+        assert_eq!(executables.len(), 1);
+        assert!(paths[0].contains("Blender 4.2"));
+    }
+
+    #[test]
+    fn normalizes_paths_for_blender_installs_and_scan_roots() {
+        let sandbox = TestDir::new("normalize-paths");
+        let install_dir = sandbox.path().join("Custom Build");
+        fs::create_dir_all(&install_dir).unwrap();
+        let executable_path = install_dir.join(BLENDER_EXECUTABLE_NAME);
+        let other_file = install_dir.join("notes.txt");
+        fs::write(&executable_path, b"").unwrap();
+        fs::write(&other_file, b"notes").unwrap();
+
+        assert_eq!(
+            normalize_blender_path("   "),
+            Err("Please provide a Blender executable path.".to_string())
+        );
+        assert_eq!(
+            normalize_blender_path(other_file.to_str().unwrap()),
+            Err("Please point to the Blender executable or a Blender install folder.".to_string())
+        );
+        assert_eq!(
+            normalize_root_path(other_file.to_str().unwrap()),
+            Err("Scan roots must be folders.".to_string())
+        );
+
+        assert_eq!(
+            normalize_blender_path(install_dir.to_str().unwrap()).unwrap(),
+            executable_path.canonicalize().unwrap()
+        );
+        assert_eq!(
+            normalize_root_path(install_dir.to_str().unwrap()).unwrap(),
+            install_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn collects_recent_projects_deduplicates_and_limits_results() {
+        let sandbox = TestDir::new("recent-projects");
+        let install_one = sandbox.path().join("Blender 4.2");
+        let install_two = sandbox.path().join("Blender 4.3");
+        let extension_one = install_one.join(BLENDER_EXTENSION_DIR);
+        let extension_two = install_two.join(BLENDER_EXTENSION_DIR);
+        fs::create_dir_all(&extension_one).unwrap();
+        fs::create_dir_all(&extension_two).unwrap();
+
+        let shared_project = sandbox.path().join("shared.blend");
+        let recent_project = sandbox.path().join("recent.blend");
+        let missing_project = sandbox.path().join("missing.blend");
+        fs::write(&shared_project, b"").unwrap();
+        fs::write(&recent_project, b"").unwrap();
+        fs::write(extension_two.join("VS_THUMB_shared.jpg"), b"thumb").unwrap();
+
+        let mut projects_one = serde_json::Map::new();
+        projects_one.insert(
+            path_to_string(&shared_project),
+            serde_json::Value::String("2026-03-20 10:00:00".to_string()),
+        );
+        projects_one.insert(
+            path_to_string(&recent_project),
+            serde_json::Value::String("2026-03-21 09:00:00".to_string()),
+        );
+        projects_one.insert(
+            " ".to_string(),
+            serde_json::Value::String("2026-03-19 00:00:00".to_string()),
+        );
+
+        let mut projects_two = serde_json::Map::new();
+        projects_two.insert(
+            path_to_string(&shared_project),
+            serde_json::Value::String("2026-03-22 08:00:00".to_string()),
+        );
+        projects_two.insert(
+            path_to_string(&missing_project),
+            serde_json::Value::String("2026-03-23 08:00:00".to_string()),
+        );
+
+        fs::write(
+            extension_one.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({ "lastOpen": null, "blenderProjects": projects_one }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extension_two.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({ "lastOpen": null, "blenderProjects": projects_two }).to_string(),
+        )
+        .unwrap();
+
+        let unavailable_install = sandbox.path().join("Unavailable");
+        let unavailable_extension = unavailable_install.join(BLENDER_EXTENSION_DIR);
+        fs::create_dir_all(&unavailable_extension).unwrap();
+        fs::write(
+            unavailable_extension.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({
+                "blenderProjects": {
+                    path_to_string(&sandbox.path().join("ignored.blend")): "2026-03-24 09:00:00"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let projects = collect_recent_projects(&[
+            make_installed_version(
+                "version-42",
+                "Blender 4.2",
+                Some("4.2.3"),
+                &install_one,
+                true,
+            ),
+            make_installed_version(
+                "version-43",
+                "Blender 4.3",
+                Some("4.3.0"),
+                &install_two,
+                true,
+            ),
+            make_installed_version(
+                "version-unavailable",
+                "Blender 3.6",
+                Some("3.6.0"),
+                &unavailable_install,
+                false,
+            ),
+        ]);
+
+        assert_eq!(projects.len(), 3);
+        assert_eq!(projects[0].file_path, path_to_string(&missing_project));
+        assert!(!projects[0].exists);
+        assert_eq!(projects[1].file_path, path_to_string(&shared_project));
+        assert_eq!(projects[1].blender_id, "version-43");
+        assert_eq!(
+            projects[1].thumbnail_path,
+            Some(path_to_string(&extension_two.join("VS_THUMB_shared.jpg")))
+        );
+        assert_eq!(projects[2].file_path, path_to_string(&recent_project));
+
+        let limited_install = sandbox.path().join("Blender 4.5");
+        let limited_extension = limited_install.join(BLENDER_EXTENSION_DIR);
+        fs::create_dir_all(&limited_extension).unwrap();
+        let mut many_projects = serde_json::Map::new();
+        for index in 0..13 {
+            let project_path = sandbox.path().join(format!("project-{index}.blend"));
+            fs::write(&project_path, b"").unwrap();
+            many_projects.insert(
+                path_to_string(&project_path),
+                serde_json::Value::String(format!("2026-03-{index:02} 10:00:00")),
+            );
+        }
+        fs::write(
+            limited_extension.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({ "blenderProjects": many_projects }).to_string(),
+        )
+        .unwrap();
+
+        let limited_projects = collect_recent_projects(&[make_installed_version(
+            "version-45",
+            "Blender 4.5",
+            Some("4.5.0"),
+            &limited_install,
+            true,
+        )]);
+        assert_eq!(limited_projects.len(), 12);
+    }
+
+    #[test]
+    fn reads_voxelshift_state_and_thumbnail_paths_safely() {
+        let sandbox = TestDir::new("voxelshift-state");
+        let extension_dir = sandbox.path().join(BLENDER_EXTENSION_DIR);
+        fs::create_dir_all(&extension_dir).unwrap();
+        let state_path = extension_dir.join(BLENDER_EXTENSION_STATE_FILE);
+
+        fs::write(&state_path, "not-json").unwrap();
+        assert!(read_voxelshift_state(&state_path).is_none());
+
+        fs::write(
+            &state_path,
+            serde_json::json!({
+                "lastOpen": "scene.blend",
+                "blenderProjects": { "scene.blend": "2026-03-20 10:00:00" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(read_voxelshift_state(&state_path).is_some());
+        assert!(recent_project_thumbnail_path(&extension_dir, "scene").is_none());
+
+        let thumb_path = extension_dir.join("VS_THUMB_scene.jpg");
+        fs::write(&thumb_path, b"thumb").unwrap();
+        assert_eq!(
+            recent_project_thumbnail_path(&extension_dir, "scene"),
+            Some(path_to_string(&thumb_path))
+        );
     }
 
     #[test]
     fn compares_versions_using_numeric_segments() {
         assert_eq!(compare_version_values("4.2.10", "4.2.9"), Ordering::Greater);
         assert_eq!(compare_version_values("3.6.0", "4.0.0"), Ordering::Less);
+        assert_eq!(version_key(Some("4.2.beta")), vec![4, 2]);
+        assert!(is_version_at_least("4.2", 4, 2));
+    }
+
+    #[test]
+    fn validates_install_requests_for_the_current_platform() {
+        let platform =
+            current_release_platform().expect("current platform should be supported in tests");
+        let request = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: format!("blender-4.2.3{}", platform.file_suffix),
+            url: format!(
+                "https://download.blender.org/release/Blender4.2/blender-4.2.3{}",
+                platform.file_suffix
+            ),
+        };
+
+        assert!(validate_install_request(&request).is_ok());
+        assert!(file_name_matches_platform(&request.file_name, &platform));
+        assert!(is_official_blender_download_url(&request.url));
+        assert!(is_supported_release_archive(&request.file_name));
+    }
+
+    #[test]
+    fn rejects_invalid_install_requests() {
+        let platform =
+            current_release_platform().expect("current platform should be supported in tests");
+        let wrong_suffix = if platform.file_suffix.ends_with(".zip") {
+            "-linux-x64.tar.xz"
+        } else {
+            "-windows-x64.zip"
+        };
+
+        let missing_url = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: format!("blender-4.2.3{}", platform.file_suffix),
+            url: String::new(),
+        };
+        assert_eq!(
+            validate_install_request(&missing_url),
+            Err("The release download URL is missing.".to_string())
+        );
+
+        let missing_file_name = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: String::new(),
+            url: "https://download.blender.org/release/Blender4.2/blender.zip".to_string(),
+        };
+        assert_eq!(
+            validate_install_request(&missing_file_name),
+            Err("The release file name is missing.".to_string())
+        );
+
+        let unofficial = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: format!("blender-4.2.3{}", platform.file_suffix),
+            url: "https://example.com/blender-4.2.3.zip".to_string(),
+        };
+        assert_eq!(
+            validate_install_request(&unofficial),
+            Err(
+                "Only official Blender downloads from blender.org can be installed automatically."
+                    .to_string()
+            )
+        );
+
+        let wrong_platform = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: format!("blender-4.2.3{wrong_suffix}"),
+            url: format!(
+                "https://download.blender.org/release/Blender4.2/blender-4.2.3{wrong_suffix}"
+            ),
+        };
+        assert!(matches!(
+            validate_install_request(&wrong_platform),
+            Err(message) if message.contains("does not match the current platform")
+        ));
+        assert!(!file_name_matches_platform(
+            &wrong_platform.file_name,
+            &platform
+        ));
+        assert!(is_zip_archive("file.zip"));
+        assert!(is_tar_xz_archive("file.tar.xz"));
+        assert!(!is_supported_release_archive("file.dmg"));
+    }
+
+    #[test]
+    fn sorts_versions_by_priority_before_name() {
+        let mut versions = vec![
+            make_version("Blender 4.0", Some("4.0.0"), true, false),
+            make_version("Blender 4.2", Some("4.2.0"), true, true),
+            make_version("Blender 4.1", Some("4.1.0"), false, false),
+        ];
+
+        versions.sort_by(version_sort);
+
+        assert_eq!(versions[0].display_name, "Blender 4.2");
+        assert_eq!(versions[1].display_name, "Blender 4.0");
+        assert_eq!(versions[2].display_name, "Blender 4.1");
+    }
+
+    #[test]
+    fn generates_case_insensitive_ids_for_paths_and_urls() {
+        assert_eq!(
+            make_release_id("HTTPS://DOWNLOAD.BLENDER.ORG/RELEASE/BLENDER4.2/FILE.ZIP"),
+            make_release_id("https://download.blender.org/release/blender4.2/file.zip")
+        );
+        assert_eq!(
+            make_recent_project_id("D:/Projects/Shot.blend"),
+            make_recent_project_id("d:/projects/shot.blend")
+        );
+        assert_eq!(
+            make_version_id(Path::new("D:/Apps/Blender/blender.exe")),
+            make_version_id(Path::new("d:/apps/blender/BLENDER.EXE"))
+        );
     }
 
     #[test]
@@ -2556,6 +3228,301 @@ mod tests {
                 "C:\\Program Files\\Blender\\blender.exe".to_string(),
                 "--factory-startup".to_string()
             ]
+        );
+        assert_eq!(
+            split_command_line("--background   scene.blend"),
+            vec!["--background", "scene.blend"]
+        );
+    }
+
+    #[test]
+    fn tracks_active_and_canceled_release_installs() {
+        let control = ReleaseInstallControl::default();
+
+        assert!(control.begin("release-1").is_ok());
+        assert_eq!(
+            control.begin("release-1"),
+            Err("That release is already being installed.".to_string())
+        );
+        assert_eq!(control.request_cancel("release-1").unwrap(), true);
+        assert!(control.is_cancel_requested("release-1").unwrap());
+        assert!(control.finish("release-1").is_ok());
+        assert_eq!(control.request_cancel("release-1").unwrap(), false);
+    }
+
+    #[test]
+    fn trims_values_and_normalizes_release_folder_names() {
+        assert_eq!(
+            trim_to_option("  Blender  ".to_string()),
+            Some("Blender".to_string())
+        );
+        assert_eq!(trim_to_option("   ".to_string()), None);
+        assert_eq!(
+            release_folder_name(" blender-4.2.3-windows-x64.zip "),
+            "blender-4.2.3-windows-x64"
+        );
+        assert!(eq_ignore_case("VoxelShift", "voxelshift"));
+        assert!(current_timestamp() > 0);
+        assert_eq!(
+            path_to_string(Path::new("test/scene.blend")),
+            "test/scene.blend".to_string()
+        );
+        assert_eq!(experimental_platform_rank("windows"), 0);
+    }
+    #[test]
+    fn remembers_launched_versions_for_existing_and_new_entries() {
+        let version = make_version("Blender 4.2", Some("4.2.0"), true, false);
+        let mut stored = StoredState {
+            default_id: None,
+            scan_roots: vec![],
+            tracked_versions: vec![TrackedVersion {
+                id: version.id.clone(),
+                executable_path: version.executable_path.clone(),
+                display_name: Some(version.display_name.clone()),
+                source: version.source.clone(),
+                last_launched_at: None,
+            }],
+        };
+
+        remember_launched_version(&mut stored, &version);
+        assert!(stored.tracked_versions[0].last_launched_at.is_some());
+
+        let new_version = BlenderVersion {
+            id: "version-new".to_string(),
+            display_name: " Blender Nightly ".to_string(),
+            version: Some("4.3.0".to_string()),
+            executable_path: "/apps/nightly/blender".to_string(),
+            install_dir: "/apps/nightly".to_string(),
+            source: VersionSource::Discovered,
+            available: true,
+            is_default: false,
+            last_launched_at: None,
+        };
+
+        remember_launched_version(&mut stored, &new_version);
+
+        let added = stored
+            .tracked_versions
+            .iter()
+            .find(|tracked| tracked.id == "version-new")
+            .unwrap();
+        assert_eq!(added.display_name.as_deref(), Some("Blender Nightly"));
+        assert!(added.last_launched_at.is_some());
+    }
+
+    #[test]
+    fn finalizes_extracted_releases_from_root_and_nested_archives() {
+        let sandbox = TestDir::new("finalize-release");
+        let stable_dir = sandbox.path().join("stable");
+        fs::create_dir_all(&stable_dir).unwrap();
+
+        let extraction_dir = sandbox.path().join("extract-root");
+        fs::create_dir_all(&extraction_dir).unwrap();
+        fs::write(extraction_dir.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
+
+        let request = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: format!(
+                "blender-4.2.3{}",
+                current_release_platform().unwrap().file_suffix
+            ),
+            url: "https://download.blender.org/release/Blender4.2/blender.zip".to_string(),
+        };
+
+        let final_dir = finalize_extracted_release(&request, &extraction_dir, &stable_dir).unwrap();
+        assert!(final_dir.exists());
+        assert!(final_dir.join(BLENDER_EXECUTABLE_NAME).exists());
+
+        let nested_extraction = sandbox.path().join("extract-nested");
+        let nested_root = nested_extraction.join("blender-4.3.0");
+        fs::create_dir_all(&nested_root).unwrap();
+        fs::write(nested_root.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
+
+        let nested_request = InstallReleaseRequest {
+            id: "release-2".to_string(),
+            version: "4.3.0".to_string(),
+            file_name: format!(
+                "blender-4.3.0{}",
+                current_release_platform().unwrap().file_suffix
+            ),
+            url: "https://download.blender.org/release/Blender4.3/blender.zip".to_string(),
+        };
+
+        let nested_final_dir =
+            finalize_extracted_release(&nested_request, &nested_extraction, &stable_dir).unwrap();
+        assert_eq!(
+            nested_final_dir
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some("blender-4.3.0")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_finalized_release_layouts() {
+        let sandbox = TestDir::new("finalize-release-errors");
+        let stable_dir = sandbox.path().join("stable");
+        fs::create_dir_all(&stable_dir).unwrap();
+
+        let request = InstallReleaseRequest {
+            id: "release-1".to_string(),
+            version: "4.2.3".to_string(),
+            file_name: format!(
+                "blender-4.2.3{}",
+                current_release_platform().unwrap().file_suffix
+            ),
+            url: "https://download.blender.org/release/Blender4.2/blender.zip".to_string(),
+        };
+
+        let missing_exec_dir = sandbox.path().join("missing-exec");
+        fs::create_dir_all(&missing_exec_dir).unwrap();
+        assert_eq!(
+            finalize_extracted_release(&request, &missing_exec_dir, &stable_dir),
+            Err("The downloaded archive did not contain the Blender executable.".to_string())
+        );
+
+        let conflicting_extract_dir = sandbox.path().join("conflict");
+        fs::create_dir_all(&conflicting_extract_dir).unwrap();
+        fs::write(conflicting_extract_dir.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
+        fs::create_dir_all(stable_dir.join("conflict")).unwrap();
+        assert!(matches!(
+            finalize_extracted_release(&request, &conflicting_extract_dir, &stable_dir),
+            Err(message) if message.contains("The install folder already exists")
+        ));
+    }
+    #[test]
+    fn merges_launcher_state_with_manual_overrides_and_defaults() {
+        let sandbox = TestDir::new("merge-launcher-state");
+        let discovered_dir = sandbox.path().join("Discovered 4.2");
+        let tracked_only_dir = sandbox.path().join("Tracked Only");
+        fs::create_dir_all(&discovered_dir).unwrap();
+        fs::write(discovered_dir.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
+
+        let discovered_path = discovered_dir.join(BLENDER_EXECUTABLE_NAME);
+        let tracked_missing_path = tracked_only_dir.join(BLENDER_EXECUTABLE_NAME);
+        let discovered_id = make_version_id(&discovered_path);
+        let tracked_only_id = make_version_id(&tracked_missing_path);
+
+        let stored = StoredState {
+            default_id: Some(discovered_id.clone()),
+            scan_roots: vec!["D:/Custom".to_string()],
+            tracked_versions: vec![
+                TrackedVersion {
+                    id: discovered_id.clone(),
+                    executable_path: path_to_string(&discovered_path),
+                    display_name: Some("  Manual Name  ".to_string()),
+                    source: VersionSource::Manual,
+                    last_launched_at: Some(44),
+                },
+                TrackedVersion {
+                    id: tracked_only_id.clone(),
+                    executable_path: path_to_string(&tracked_missing_path),
+                    display_name: None,
+                    source: VersionSource::Manual,
+                    last_launched_at: Some(12),
+                },
+            ],
+        };
+
+        let discovered = vec![BlenderVersion {
+            id: discovered_id.clone(),
+            display_name: "Discovered Name".to_string(),
+            version: Some("4.2.3".to_string()),
+            executable_path: path_to_string(&discovered_path),
+            install_dir: path_to_string(&discovered_dir),
+            source: VersionSource::Discovered,
+            available: true,
+            is_default: false,
+            last_launched_at: None,
+        }];
+
+        let state = merge_launcher_state(&stored, discovered, 99);
+        assert_eq!(state.detected_at, 99);
+        assert_eq!(state.scan_roots, vec!["D:/Custom".to_string()]);
+        assert_eq!(state.versions.len(), 2);
+
+        let default_version = state
+            .versions
+            .iter()
+            .find(|version| version.id == discovered_id)
+            .unwrap();
+        assert_eq!(default_version.display_name, "Manual Name");
+        assert_eq!(default_version.source, VersionSource::Manual);
+        assert!(default_version.available);
+        assert!(default_version.is_default);
+        assert_eq!(default_version.last_launched_at, Some(44));
+
+        let tracked_only_version = state
+            .versions
+            .iter()
+            .find(|version| version.id == tracked_only_id)
+            .unwrap();
+        assert!(!tracked_only_version.available);
+        assert_eq!(tracked_only_version.version, None);
+        assert_eq!(tracked_only_version.last_launched_at, Some(12));
+    }
+
+    #[test]
+    fn mutates_scan_roots_case_insensitively() {
+        let mut scan_roots = vec!["D:/Beta".to_string(), "D:/alpha".to_string()];
+
+        assert!(!add_scan_root_value(
+            &mut scan_roots,
+            "d:/ALPHA".to_string()
+        ));
+        assert!(add_scan_root_value(&mut scan_roots, "D:/Gamma".to_string()));
+        assert_eq!(
+            scan_roots,
+            vec![
+                "D:/alpha".to_string(),
+                "D:/Beta".to_string(),
+                "D:/Gamma".to_string()
+            ]
+        );
+        assert!(remove_scan_root_value(&mut scan_roots, "d:/beta"));
+        assert!(!remove_scan_root_value(&mut scan_roots, "d:/missing"));
+        assert_eq!(
+            scan_roots,
+            vec!["D:/alpha".to_string(), "D:/Gamma".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolves_launch_versions_and_project_paths() {
+        let sandbox = TestDir::new("launch-validation");
+        let project_path = sandbox.path().join("scene.blend");
+        fs::write(&project_path, b"").unwrap();
+
+        let available = make_version("Blender 4.2", Some("4.2.0"), true, false);
+        let unavailable = make_version("Blender 4.1", Some("4.1.0"), false, false);
+
+        assert_eq!(
+            resolve_launch_version(&[available.clone()], &available.id)
+                .unwrap()
+                .id,
+            available.id
+        );
+        assert_eq!(
+            resolve_launch_version(&[unavailable], "id-Blender 4.1").unwrap_err(),
+            "That Blender executable is missing.".to_string()
+        );
+        assert_eq!(
+            resolve_launch_version(&[available], "missing").unwrap_err(),
+            "Could not find that Blender version.".to_string()
+        );
+
+        assert_eq!(
+            validate_project_launch_path("   "),
+            Err("The Blender project path is missing.".to_string())
+        );
+        assert_eq!(
+            validate_project_launch_path(sandbox.path().join("missing.blend").to_str().unwrap()),
+            Err("That Blender project file could not be found.".to_string())
+        );
+        assert_eq!(
+            validate_project_launch_path(project_path.to_str().unwrap()).unwrap(),
+            project_path
         );
     }
 }
