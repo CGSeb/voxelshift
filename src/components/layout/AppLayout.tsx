@@ -1,4 +1,4 @@
-import type { PropsWithChildren } from "react";
+import type { PropsWithChildren, ReactNode } from "react";
 import { AppMenu, type PageKey } from "./AppMenu";
 
 interface AppLayoutProps extends PropsWithChildren {
@@ -7,9 +7,10 @@ interface AppLayoutProps extends PropsWithChildren {
   eyebrow: string;
   title: string;
   description: string;
+  footer?: ReactNode;
 }
 
-export function AppLayout({ activePage, onNavigate, eyebrow, title, description, children }: AppLayoutProps) {
+export function AppLayout({ activePage, onNavigate, eyebrow, title, description, footer, children }: AppLayoutProps) {
   return (
     <main className="app-shell">
       <section className="home-frame">
@@ -51,6 +52,10 @@ export function AppLayout({ activePage, onNavigate, eyebrow, title, description,
 
         <div className="page-content">{children}</div>
       </section>
+
+      {footer ? (
+        <div className="app-footer-shell">{footer}</div>
+      ) : null}
     </main>
   );
 }

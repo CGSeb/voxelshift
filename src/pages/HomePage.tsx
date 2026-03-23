@@ -55,8 +55,18 @@ function formatBlenderLabel(project: RecentProject) {
   return project.blenderVersion ? `Blender ${project.blenderVersion}` : project.blenderDisplayName;
 }
 
+function getProjectThumbnailVersion(project: RecentProject) {
+  return `${project.thumbnailPath ?? "none"}:${project.savedAt}`;
+}
+
 function getProjectThumbnailSrc(project: RecentProject) {
-  return project.thumbnailPath ? convertFileSrc(project.thumbnailPath) : null;
+  if (!project.thumbnailPath) {
+    return null;
+  }
+
+  const src = convertFileSrc(project.thumbnailPath);
+  const cacheKey = encodeURIComponent(getProjectThumbnailVersion(project));
+  return `${src}${src.includes("?") ? "&" : "?"}v=${cacheKey}`;
 }
 
 function getProjectMonogram(project: RecentProject) {
@@ -189,7 +199,8 @@ export function HomePage({
           {visibleRecentProjects.length > 0 ? (
             visibleRecentProjects.map((project) => {
               const thumbnailSrc = getProjectThumbnailSrc(project);
-              const showThumbnail = Boolean(thumbnailSrc) && !failedThumbnailIds[project.id];
+              const thumbnailVersion = getProjectThumbnailVersion(project);
+              const showThumbnail = Boolean(thumbnailSrc) && !failedThumbnailIds[thumbnailVersion];
 
               return (
                 <article className="home-card home-card-project" key={project.id}>
@@ -202,12 +213,13 @@ export function HomePage({
                   >
                     {showThumbnail ? (
                       <img
+                        key={thumbnailVersion}
                         className="home-project-thumbnail"
                         src={thumbnailSrc!}
                         alt={`${project.name} thumbnail`}
                         onError={() =>
                           setFailedThumbnailIds((current) =>
-                            current[project.id] ? current : { ...current, [project.id]: true },
+                            current[thumbnailVersion] ? current : { ...current, [thumbnailVersion]: true },
                           )
                         }
                       />

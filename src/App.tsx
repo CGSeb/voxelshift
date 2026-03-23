@@ -1,6 +1,9 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useEffectEvent, useState } from "react";
+import { AppUpdateToast } from "./components/AppUpdateToast";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { AppFooter } from "./components/layout/AppFooter";
 import { AppLayout } from "./components/layout/AppLayout";
 import type { PageKey } from "./components/layout/AppMenu";
 import {
@@ -13,6 +16,7 @@ import {
   launchBlenderProject,
   removeBlenderVersion,
 } from "./lib/api";
+import { checkForAppUpdate, type AppUpdate, type AppUpdateDownloadEvent, type AppUpdateInfo } from "./lib/updater";
 import { HomePage } from "./pages/HomePage";
 import { ReleasesPage } from "./pages/ReleasesPage";
 import type {
@@ -28,6 +32,9 @@ import type {
 const favoriteReleaseStorageKey = "voxelshift.favorite-release-downloads";
 const releaseInstallEvent = "release-install-progress";
 const installCanceledMessage = "Installation canceled.";
+
+type AppUpdatePhase = "checking" | "idle" | "available" | "downloading" | "installing" | "completed" | "failed" | "unavailable";
+type AppFooterTone = "neutral" | "success" | "warning" | "danger";
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string; description: string }> = {
   home: {
@@ -129,6 +136,16 @@ function makeFallbackInstallStatus(
   };
 }
 
+function makeAppUpdateInfo(update: AppUpdate): AppUpdateInfo {
+  return {
+    currentVersion: update.currentVersion,
+    version: update.version,
+    date: update.date,
+    body: update.body,
+    rawJson: update.rawJson,
+  };
+}
+
 function isManagedInstall(version: BlenderVersion) {
   const normalizedInstallDir = version.installDir.replaceAll("\\", "/").toLowerCase();
   return normalizedInstallDir.includes("/voxelshift/stable/");
@@ -148,6 +165,15 @@ export default function App() {
   const [pendingUninstallDownload, setPendingUninstallDownload] = useState<BlenderReleaseDownload | null>(null);
   const [isRemovingVersion, setIsRemovingVersion] = useState(false);
   const [removeVersionError, setRemoveVersionError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [appUpdatePhase, setAppUpdatePhase] = useState<AppUpdatePhase>("checking");
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
+  const [isAppUpdateToastOpen, setIsAppUpdateToastOpen] = useState(false);
+  const [appUpdateDownloadedBytes, setAppUpdateDownloadedBytes] = useState(0);
+  const [appUpdateTotalBytes, setAppUpdateTotalBytes] = useState<number | null>(null);
+  const [appUpdateProgressPercent, setAppUpdateProgressPercent] = useState<number | null>(null);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -183,6 +209,83 @@ export default function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    async function loadAppVersion() {
+      try {
+        const version = await getVersion();
+        if (!isDisposed) {
+          setAppVersion(version);
+        }
+      } catch {
+        if (!isDisposed) {
+          setAppVersion(null);
+        }
+      }
+    }
+
+    void loadAppVersion();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    async function loadAppUpdate() {
+      setAppUpdatePhase("checking");
+      setAppUpdateError(null);
+
+      try {
+        const nextUpdate = await checkForAppUpdate();
+
+        if (isDisposed) {
+          if (nextUpdate) {
+            void nextUpdate.close();
+          }
+          return;
+        }
+
+        setAppUpdate(nextUpdate);
+
+        if (nextUpdate) {
+          setAppUpdateInfo(makeAppUpdateInfo(nextUpdate));
+          setAppUpdatePhase("available");
+          setIsAppUpdateToastOpen(true);
+        } else {
+          setAppUpdateInfo(null);
+          setAppUpdatePhase("idle");
+        }
+      } catch (error) {
+        if (isDisposed) {
+          return;
+        }
+
+        setAppUpdate(null);
+        setAppUpdateInfo(null);
+        setAppUpdatePhase("unavailable");
+        setAppUpdateError(readErrorMessage(error, "Could not check for Voxel Shift updates."));
+      }
+    }
+
+    void loadAppUpdate();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (appUpdate) {
+        void appUpdate.close();
+      }
+    };
+  }, [appUpdate]);
 
   async function refreshHomePageData(options?: { silent?: boolean }) {
     const isSilent = options?.silent ?? false;
@@ -478,6 +581,76 @@ export default function App() {
     setRemoveVersionError(null);
   }
 
+  async function installAvailableAppUpdate() {
+    if (!appUpdate || (appUpdatePhase !== "available" && appUpdatePhase !== "failed")) {
+      return;
+    }
+
+    setIsAppUpdateToastOpen(true);
+    setAppUpdateError(null);
+    setAppUpdateDownloadedBytes(0);
+    setAppUpdateTotalBytes(null);
+    setAppUpdateProgressPercent(null);
+    setAppUpdatePhase("downloading");
+
+    let downloadedBytes = 0;
+    let totalBytes: number | null = null;
+
+    try {
+      await appUpdate.downloadAndInstall((event: AppUpdateDownloadEvent) => {
+        if (event.event === "Started") {
+          downloadedBytes = 0;
+          totalBytes = event.data.contentLength ?? null;
+          setAppUpdateDownloadedBytes(0);
+          setAppUpdateTotalBytes(totalBytes);
+          setAppUpdateProgressPercent(totalBytes ? 0 : null);
+          setAppUpdatePhase("downloading");
+          return;
+        }
+
+        if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+          setAppUpdateDownloadedBytes(downloadedBytes);
+          setAppUpdateProgressPercent(totalBytes ? Math.min(100, (downloadedBytes / totalBytes) * 100) : null);
+          return;
+        }
+
+        if (totalBytes !== null) {
+          setAppUpdateDownloadedBytes(totalBytes);
+          setAppUpdateProgressPercent(100);
+        }
+        setAppUpdatePhase("installing");
+      });
+
+      setAppUpdatePhase("completed");
+      setAppUpdateError(null);
+      setAppUpdateProgressPercent(100);
+      if (totalBytes !== null) {
+        setAppUpdateDownloadedBytes(totalBytes);
+      }
+      setAppUpdate(null);
+    } catch (error) {
+      setAppUpdatePhase("failed");
+      setAppUpdateError(readErrorMessage(error, "Could not update Voxel Shift."));
+    }
+  }
+
+  function openAppUpdateToast() {
+    if (!appUpdateInfo && !appUpdateError) {
+      return;
+    }
+
+    setIsAppUpdateToastOpen(true);
+  }
+
+  function closeAppUpdateToast() {
+    if (appUpdatePhase === "downloading" || appUpdatePhase === "installing") {
+      return;
+    }
+
+    setIsAppUpdateToastOpen(false);
+  }
+
   const installedReleaseVersions = new Map<string, BlenderVersion>();
 
   for (const version of launcherState?.versions ?? []) {
@@ -523,6 +696,55 @@ export default function App() {
   }
 
   const activeMeta = pageMeta[activePage];
+  const isCheckingForAppUpdates = appUpdatePhase === "checking";
+  const isUpdatingApp = appUpdatePhase === "downloading" || appUpdatePhase === "installing";
+  const canInstallAppUpdate = Boolean(appUpdate) && (appUpdatePhase === "available" || appUpdatePhase === "failed");
+  const canDismissAppUpdateToast = appUpdatePhase !== "downloading" && appUpdatePhase !== "installing";
+  const shouldShowAppUpdateToast = isAppUpdateToastOpen && Boolean(appUpdateInfo || appUpdateError);
+  const footerVersionLabel = appVersion ?? appUpdateInfo?.currentVersion ?? null;
+  const appUpdateActionLabel = canInstallAppUpdate
+    ? appUpdatePhase === "failed"
+      ? "Retry update"
+      : appUpdateInfo
+        ? `Update to v${appUpdateInfo.version}`
+        : "Install update"
+    : null;
+  const appUpdateDetailsLabel = appUpdateInfo ? (shouldShowAppUpdateToast ? null : "Details") : null;
+
+  let appUpdateSummary = "You're up to date";
+  let appUpdateTone: AppFooterTone = "neutral";
+
+  switch (appUpdatePhase) {
+    case "checking":
+      appUpdateSummary = "Checking for updates";
+      break;
+    case "available":
+      appUpdateSummary = appUpdateInfo ? `Update v${appUpdateInfo.version} available` : "Update available";
+      appUpdateTone = "warning";
+      break;
+    case "downloading":
+      appUpdateSummary = appUpdateInfo ? `Downloading v${appUpdateInfo.version}` : "Downloading update";
+      appUpdateTone = "warning";
+      break;
+    case "installing":
+      appUpdateSummary = appUpdateInfo ? `Installing v${appUpdateInfo.version}` : "Installing update";
+      appUpdateTone = "warning";
+      break;
+    case "completed":
+      appUpdateSummary = appUpdateInfo ? `Installed v${appUpdateInfo.version}` : "Update installed";
+      appUpdateTone = "success";
+      break;
+    case "failed":
+      appUpdateSummary = appUpdateInfo ? `Update v${appUpdateInfo.version} failed` : "Update failed";
+      appUpdateTone = "danger";
+      break;
+    case "unavailable":
+      appUpdateSummary = "Updates unavailable";
+      appUpdateTone = "danger";
+      break;
+    default:
+      break;
+  }
 
   return (
     <>
@@ -532,6 +754,20 @@ export default function App() {
         eyebrow={activeMeta.eyebrow}
         title={activeMeta.title}
         description={activeMeta.description}
+        footer={
+          <AppFooter
+            appVersion={footerVersionLabel}
+            updateSummary={appUpdateSummary}
+            updateTone={appUpdateTone}
+            updateVersion={appUpdateInfo?.version ?? null}
+            detailsLabel={appUpdateDetailsLabel}
+            updateActionLabel={appUpdateActionLabel}
+            isCheckingForUpdates={isCheckingForAppUpdates}
+            isUpdating={isUpdatingApp}
+            onInstallUpdate={canInstallAppUpdate ? () => void installAvailableAppUpdate() : null}
+            onShowUpdateDetails={appUpdateInfo ? openAppUpdateToast : null}
+          />
+        }
       >
         {activePage === "home" ? (
           <HomePage
@@ -561,6 +797,21 @@ export default function App() {
         )}
       </AppLayout>
 
+      {shouldShowAppUpdateToast ? (
+        <AppUpdateToast
+          phase={appUpdatePhase}
+          updateInfo={appUpdateInfo}
+          errorMessage={appUpdateError}
+          progressPercent={appUpdateProgressPercent}
+          downloadedBytes={appUpdateDownloadedBytes}
+          totalBytes={appUpdateTotalBytes}
+          actionLabel={appUpdateActionLabel}
+          canDismiss={canDismissAppUpdateToast}
+          onInstallUpdate={canInstallAppUpdate ? () => void installAvailableAppUpdate() : null}
+          onClose={closeAppUpdateToast}
+        />
+      ) : null}
+
       <ConfirmDialog
         open={pendingUninstallDownload !== null}
         title={pendingUninstallDownload ? `Remove Blender ${pendingUninstallDownload.version}?` : "Remove Blender?"}
@@ -584,13 +835,4 @@ export default function App() {
     </>
   );
 }
-
-
-
-
-
-
-
-
-
 
