@@ -12,12 +12,13 @@ use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager};
+use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, Window, WindowEvent};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
+const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
 #[cfg(target_os = "windows")]
 const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
 #[cfg(target_os = "linux")]
@@ -143,6 +144,28 @@ struct StoredState {
     tracked_versions: Vec<TrackedVersion>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct StoredWindowState {
+    position: Option<StoredWindowPosition>,
+    size: Option<StoredWindowSize>,
+    is_maximized: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredWindowPosition {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredWindowSize {
+    width: u32,
+    height: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackedVersion {
@@ -262,14 +285,34 @@ pub fn run() {
         .manage(ReleaseInstallControl::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            if let (Some(window), Some(icon)) = (
-                app.get_webview_window("main"),
-                app.default_window_icon().cloned(),
-            ) {
-                window.set_icon(icon)?;
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    window.set_icon(icon)?;
+                }
+
+                if let Err(error) = restore_window_state(&window) {
+                    eprintln!("Unable to restore window state: {error}");
+                }
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+
+            match event {
+                WindowEvent::Moved(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::CloseRequested { .. }
+                | WindowEvent::Destroyed => {
+                    if let Err(error) = save_window_state_for(window) {
+                        eprintln!("Unable to save window state: {error}");
+                    }
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_launcher_state,
@@ -2242,6 +2285,101 @@ fn state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Unable to find application data directory: {error}"))?;
 
     Ok(app_data_dir.join(STATE_FILE_NAME))
+}
+
+fn load_window_state(app: &AppHandle) -> Result<Option<StoredWindowState>, String> {
+    let file_path = window_state_file_path(app)?;
+
+    if !file_path.exists() {
+        return Ok(None);
+    }
+
+    let contents =
+        fs::read_to_string(&file_path).map_err(|error| format!("Unable to read window state: {error}"))?;
+
+    let state = serde_json::from_str(&contents)
+        .map_err(|error| format!("Unable to parse window state file: {error}"))?;
+
+    Ok(Some(state))
+}
+
+fn save_window_state(app: &AppHandle, state: &StoredWindowState) -> Result<(), String> {
+    let file_path = window_state_file_path(app)?;
+    let directory = file_path
+        .parent()
+        .ok_or_else(|| "Unable to access application data directory.".to_string())?;
+
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("Unable to prepare application data directory: {error}"))?;
+
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("Unable to serialize window state: {error}"))?;
+
+    fs::write(file_path, json).map_err(|error| format!("Unable to save window state: {error}"))
+}
+
+fn save_window_state_for(window: &Window) -> Result<(), String> {
+    let app = window.app_handle();
+    let mut state = load_window_state(&app)?.unwrap_or_default();
+
+    state.is_maximized = window
+        .is_maximized()
+        .map_err(|error| format!("Unable to read window maximized state: {error}"))?;
+
+    if !state.is_maximized {
+        let position = window
+            .outer_position()
+            .map_err(|error| format!("Unable to read window position: {error}"))?;
+        let size = window
+            .outer_size()
+            .map_err(|error| format!("Unable to read window size: {error}"))?;
+
+        state.position = Some(StoredWindowPosition {
+            x: position.x,
+            y: position.y,
+        });
+        state.size = Some(StoredWindowSize {
+            width: size.width,
+            height: size.height,
+        });
+    }
+
+    save_window_state(&app, &state)
+}
+
+fn restore_window_state(window: &WebviewWindow) -> Result<(), String> {
+    let Some(state) = load_window_state(&window.app_handle())? else {
+        return Ok(());
+    };
+
+    if let Some(size) = state.size {
+        window
+            .set_size(Size::Physical(PhysicalSize::new(size.width, size.height)))
+            .map_err(|error| format!("Unable to restore window size: {error}"))?;
+    }
+
+    if let Some(position) = state.position {
+        window
+            .set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
+            .map_err(|error| format!("Unable to restore window position: {error}"))?;
+    }
+
+    if state.is_maximized {
+        window
+            .maximize()
+            .map_err(|error| format!("Unable to restore maximized window state: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn window_state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Unable to find application data directory: {error}"))?;
+
+    Ok(app_data_dir.join(WINDOW_STATE_FILE_NAME))
 }
 
 fn default_scan_roots(app: &AppHandle) -> Vec<PathBuf> {
