@@ -11,12 +11,14 @@ export default defineConfig({
   envPrefix: ["VITE_", "TAURI_"],
   test: {
     environment: "jsdom",
+    setupFiles: ["./vitest.setup.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],
       reportsDirectory: "./coverage",
       include: ["src/**/*.{ts,tsx}"],
-      exclude: ["src/main.tsx", "src/vite-env.d.ts"]
+      exclude: ["src/main.tsx", "src/types.ts", "src/vite-env.d.ts"]
     }
   }
 });
+
