@@ -159,6 +159,9 @@ describe("App", () => {
     render(<App />);
 
     await screen.findByText("Voxel Shift 1.1.0 is ready");
+    expect(screen.getByText("Update available")).toBeInTheDocument();
+    expect(screen.queryByText("Update v1.1.0 available")).not.toBeInTheDocument();
+    expect(screen.queryByText("Latest v1.1.0")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Later" }));
     fireEvent.click(screen.getByRole("button", { name: "Details" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Update to v1.1.0" })[0]);

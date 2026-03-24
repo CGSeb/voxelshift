@@ -713,14 +713,16 @@ export default function App() {
 
   let appUpdateSummary = "You're up to date";
   let appUpdateTone: AppFooterTone = "neutral";
+  let footerUpdateVersion = appUpdateInfo?.version ?? null;
 
   switch (appUpdatePhase) {
     case "checking":
       appUpdateSummary = "Checking for updates";
       break;
     case "available":
-      appUpdateSummary = appUpdateInfo ? `Update v${appUpdateInfo.version} available` : "Update available";
+      appUpdateSummary = "Update available";
       appUpdateTone = "warning";
+      footerUpdateVersion = null;
       break;
     case "downloading":
       appUpdateSummary = appUpdateInfo ? `Downloading v${appUpdateInfo.version}` : "Downloading update";
@@ -759,7 +761,7 @@ export default function App() {
             appVersion={footerVersionLabel}
             updateSummary={appUpdateSummary}
             updateTone={appUpdateTone}
-            updateVersion={appUpdateInfo?.version ?? null}
+            updateVersion={footerUpdateVersion}
             detailsLabel={appUpdateDetailsLabel}
             updateActionLabel={appUpdateActionLabel}
             isCheckingForUpdates={isCheckingForAppUpdates}

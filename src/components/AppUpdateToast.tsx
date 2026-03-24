@@ -20,6 +20,8 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
 });
 
+const genericReleaseBody = "See the assets to download and install this version.";
+
 function formatUpdateDate(value?: string) {
   if (!value) {
     return null;
@@ -41,6 +43,11 @@ function formatBytes(value: number) {
   return `${normalized.toFixed(digits)} ${units[exponent]}`;
 }
 
+function normalizeReleaseNotes(value?: string) {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === genericReleaseBody ? "" : trimmed;
+}
+
 export function AppUpdateToast({
   phase,
   updateInfo,
@@ -58,7 +65,7 @@ export function AppUpdateToast({
   const showProgress = phase === "downloading" || phase === "installing" || phase === "completed";
   const isIndeterminate = phase === "installing" || (phase === "downloading" && progressPercent === null);
   const progressValue = phase === "completed" ? 100 : progressPercent;
-  const releaseNotes = updateInfo?.body?.trim() ?? "";
+  const releaseNotes = normalizeReleaseNotes(updateInfo?.body);
 
   let title = "Voxel Shift update";
   let message = "A new update is ready to install.";
@@ -114,7 +121,7 @@ export function AppUpdateToast({
           {versionLabel || releaseDateLabel ? (
             <p className="app-toast-meta">
               {versionLabel}
-              {versionLabel && releaseDateLabel ? " • " : ""}
+              {versionLabel && releaseDateLabel ? " - " : ""}
               {releaseDateLabel}
             </p>
           ) : null}

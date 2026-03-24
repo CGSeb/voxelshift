@@ -1,6 +1,6 @@
 [package]
 name = "voxel-shift"
-version = "0.1.0"
+version = "0.2.0"
 description = "Voxel Shift desktop launcher"
 authors = ["CGSeb"]
 edition = "2021"

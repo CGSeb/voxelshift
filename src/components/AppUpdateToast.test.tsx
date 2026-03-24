@@ -41,6 +41,25 @@ describe("AppUpdateToast", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("hides the generic github release body from the update popup", () => {
+    render(
+      <AppUpdateToast
+        phase="available"
+        updateInfo={{ ...updateInfo, body: "See the assets to download and install this version." }}
+        errorMessage={null}
+        progressPercent={null}
+        downloadedBytes={0}
+        totalBytes={null}
+        actionLabel="Update now"
+        canDismiss
+        onInstallUpdate={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("See the assets to download and install this version.")).not.toBeInTheDocument();
+  });
+
   it("shows progress details while downloading and locks dismissal during install", () => {
     render(
       <AppUpdateToast

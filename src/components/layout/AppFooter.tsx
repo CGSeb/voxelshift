@@ -1,4 +1,5 @@
-import { Download, LoaderCircle } from "lucide-react";
+import { CheckCircle2, Download, LoaderCircle } from "lucide-react";
+import { Tooltip } from "../Tooltip";
 
 interface AppFooterProps {
   appVersion: string | null;
@@ -25,26 +26,39 @@ export function AppFooter({
   onInstallUpdate,
   onShowUpdateDetails,
 }: AppFooterProps) {
+  const isUpToDate = !isCheckingForUpdates && updateSummary === "You're up to date";
+
   return (
     <footer className="app-footer" aria-label="Voxel Shift status bar">
       <div className="app-footer-copy">
         <span className="app-footer-label">Voxel Shift</span>
         <span className="app-footer-version">{appVersion ? `v${appVersion}` : "Version unavailable"}</span>
+        {isUpToDate ? (
+          <Tooltip content="Up to date">
+            <span className="app-footer-up-to-date" aria-label="Up to date" tabIndex={0}>
+              <CheckCircle2 size={14} strokeWidth={2} aria-hidden="true" />
+            </span>
+          </Tooltip>
+        ) : null}
       </div>
 
-      <div className="app-footer-status-row">
-        <span className={`app-footer-status app-footer-status-${updateTone}`}>
-          {isCheckingForUpdates ? (
-            <>
-              <LoaderCircle className="app-footer-status-icon app-spinner" size={14} strokeWidth={2} />
+      {!isUpToDate ? (
+        <div className="app-footer-status-row">
+          <span className={`app-footer-status app-footer-status-${updateTone}`}>
+            {isCheckingForUpdates ? (
+              <>
+                <LoaderCircle className="app-footer-status-icon app-spinner" size={14} strokeWidth={2} />
+                <span>{updateSummary}</span>
+              </>
+            ) : (
               <span>{updateSummary}</span>
-            </>
-          ) : (
-            <span>{updateSummary}</span>
-          )}
-        </span>
-        {updateVersion ? <span className="app-footer-target">Latest v{updateVersion}</span> : null}
-      </div>
+            )}
+          </span>
+          {updateVersion ? <span className="app-footer-target">Latest v{updateVersion}</span> : null}
+        </div>
+      ) : (
+        <div className="app-footer-status-row" />
+      )}
 
       <div className="app-footer-actions">
         {detailsLabel && onShowUpdateDetails ? (
