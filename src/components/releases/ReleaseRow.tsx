@@ -1,4 +1,5 @@
-import { Play, Star } from "lucide-react";
+import { Cog, Play, Star } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { isBlenderLtsVersion } from "../../lib/blenderVersions";
 import type { BlenderReleaseDownload, BlenderReleaseInstallProgress, BlenderVersion } from "../../types";
 import { Tooltip } from "../Tooltip";
@@ -13,6 +14,7 @@ interface ReleaseRowProps {
   onInstall: (download: BlenderReleaseDownload) => void;
   onCancelInstall: (download: BlenderReleaseDownload) => void;
   onLaunchVersion: (version: BlenderVersion) => void;
+  onOpenConfigs: (version: BlenderVersion, mode: "save" | "apply") => void;
   onToggleFavorite: (download: BlenderReleaseDownload) => void;
   onOpenUninstall: (download: BlenderReleaseDownload) => void;
 }
@@ -74,9 +76,12 @@ export function ReleaseRow({
   onInstall,
   onCancelInstall,
   onLaunchVersion,
+  onOpenConfigs,
   onToggleFavorite,
   onOpenUninstall,
 }: ReleaseRowProps) {
+  const [isConfigMenuOpen, setIsConfigMenuOpen] = useState(false);
+  const configMenuRef = useRef<HTMLDivElement | null>(null);
   const isFavorite = favoriteReleaseValues.includes(download.version) || favoriteReleaseValues.includes(download.id);
   const installedVersion = isCurrentPlatformList ? installedReleaseVersions.get(download.version) : undefined;
   const isInstalled = Boolean(installedVersion);
@@ -94,6 +99,41 @@ export function ReleaseRow({
   const installStatusClassName = installStatus
     ? `release-install-status release-install-status-${installStatus.phase}`
     : "release-install-status";
+
+  useEffect(() => {
+    if (!isConfigMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!configMenuRef.current?.contains(event.target as Node)) {
+        setIsConfigMenuOpen(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsConfigMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isConfigMenuOpen]);
+
+  function openConfigDialog(mode: "save" | "apply") {
+    if (!installedVersion) {
+      return;
+    }
+
+    setIsConfigMenuOpen(false);
+    onOpenConfigs(installedVersion, mode);
+  }
 
   return (
     <article className="release-row release-row-item">
@@ -122,6 +162,37 @@ export function ReleaseRow({
               >
                 <Play className="release-launch-icon" aria-hidden="true" fill="currentColor" strokeWidth={1.75} />
               </button>
+            </Tooltip>
+
+            <Tooltip content={`Manage configs for Blender ${download.version}`}>
+              <div className="release-config-menu-shell" ref={configMenuRef}>
+                <button
+                  className="release-config-button"
+                  type="button"
+                  onClick={() => setIsConfigMenuOpen((current) => !current)}
+                  aria-label={`Manage configs for Blender ${download.version}`}
+                  aria-haspopup="menu"
+                  aria-expanded={isConfigMenuOpen}
+                >
+                  <Cog className="release-launch-icon" aria-hidden="true" strokeWidth={1.75} />
+                </button>
+
+                {isConfigMenuOpen ? (
+                  <div className="release-config-menu" role="menu" aria-label={`Config actions for Blender ${download.version}`}>
+                    <button className="release-config-menu-item" type="button" role="menuitem" onClick={() => openConfigDialog("save")}>
+                      Save config
+                    </button>
+                    <button
+                      className="release-config-menu-item"
+                      type="button"
+                      role="menuitem"
+                      onClick={() => openConfigDialog("apply")}
+                    >
+                      Apply a config
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </Tooltip>
 
             <Tooltip content={isFavorite ? "Remove favorite" : "Mark as favorite"}>

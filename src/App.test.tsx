@@ -1,7 +1,15 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { BlenderReleaseDownload, BlenderReleaseInstallProgress, BlenderReleaseListing, BlenderVersion, LauncherState, RecentProject } from "./types";
+import type {
+  BlenderConfigProfile,
+  BlenderReleaseDownload,
+  BlenderReleaseInstallProgress,
+  BlenderReleaseListing,
+  BlenderVersion,
+  LauncherState,
+  RecentProject,
+} from "./types";
 
 const tauriMocks = vi.hoisted(() => ({
   getVersion: vi.fn(),
@@ -9,14 +17,18 @@ const tauriMocks = vi.hoisted(() => ({
 }));
 
 const apiMocks = vi.hoisted(() => ({
+  applyBlenderConfig: vi.fn(),
   cancelBlenderReleaseInstall: vi.fn(),
+  getBlenderConfigs: vi.fn(),
   getBlenderReleaseDownloads: vi.fn(),
   getLauncherState: vi.fn(),
   getRecentProjects: vi.fn(),
   installBlenderRelease: vi.fn(),
   launchBlender: vi.fn(),
   launchBlenderProject: vi.fn(),
+  removeBlenderConfig: vi.fn(),
   removeBlenderVersion: vi.fn(),
+  saveBlenderConfig: vi.fn(),
 }));
 
 const updaterMocks = vi.hoisted(() => ({
@@ -42,8 +54,8 @@ const installedVersion: BlenderVersion = {
   id: "version-42",
   displayName: "Blender 4.2.3",
   version: "4.2.3",
-  executablePath: "D:\\Blender\\blender.exe",
-  installDir: "D:\\Users\\Sebastien\\Documents\\VoxelShift\\stable\\Blender 4.2.3",
+  executablePath: "D:\\\Blender\\blender.exe",
+  installDir: "D:\\\Users\\Sebastien\\Documents\\VoxelShift\\stable\\Blender 4.2.3",
   source: "manual",
   available: true,
   isDefault: true,
@@ -93,6 +105,13 @@ const recentProject: RecentProject = {
   exists: true,
 };
 
+const savedConfig: BlenderConfigProfile = {
+  id: "Studio",
+  name: "Studio",
+  path: "D:\\Users\\Sebastien\\Documents\\VoxelShift\\configs\\Studio",
+  updatedAt: 1,
+};
+
 function emitInstallProgress(progress: BlenderReleaseInstallProgress) {
   const listener = tauriMocks.listen.mock.calls[0]?.[1] as ((event: { payload: BlenderReleaseInstallProgress }) => void) | undefined;
   listener?.({ payload: progress });
@@ -115,6 +134,10 @@ describe("App", () => {
     apiMocks.getLauncherState.mockResolvedValue(launcherState);
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
     apiMocks.getBlenderReleaseDownloads.mockResolvedValue(releaseListing);
+    apiMocks.getBlenderConfigs.mockResolvedValue([savedConfig]);
+    apiMocks.saveBlenderConfig.mockResolvedValue(savedConfig);
+    apiMocks.applyBlenderConfig.mockResolvedValue(undefined);
+    apiMocks.removeBlenderConfig.mockResolvedValue(undefined);
     apiMocks.installBlenderRelease.mockResolvedValue(launcherState);
     apiMocks.cancelBlenderReleaseInstall.mockResolvedValue(undefined);
     apiMocks.launchBlender.mockResolvedValue(launcherState);
@@ -259,7 +282,7 @@ describe("App", () => {
       downloadedBytes: 1024,
       totalBytes: 1024,
       speedBytesPerSecond: null,
-      installDir: "D:\\VoxelShift\\stable\\Blender 4.3.0",
+      installDir: "D:\\\VoxelShift\\stable\\Blender 4.3.0",
       message: "Done",
     });
     await waitFor(() => {
@@ -396,6 +419,60 @@ describe("App", () => {
     });
     await waitFor(() => {
       expect(localStorage.getItem(favoriteReleaseStorageKey)).toBe("[]");
+    });
+  });
+
+  it("opens the config menu, saves the current config, applies an existing one, and removes one after confirmation", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Releases" }));
+    await screen.findByText("Stable builds for Windows x64");
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Save config" }));
+
+    await screen.findByRole("dialog", { name: "Blender 4.2.3" });
+    expect(apiMocks.getBlenderConfigs).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Config name"), { target: { value: "Studio" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save current config" }));
+
+    await waitFor(() => {
+      expect(apiMocks.saveBlenderConfig).toHaveBeenCalledWith({
+        versionId: installedVersion.id,
+        name: "Studio",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Apply a config" }));
+
+    await screen.findByRole("dialog", { name: "Blender 4.2.3" });
+    await waitFor(() => {
+      expect(apiMocks.getBlenderConfigs).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    await waitFor(() => {
+      expect(apiMocks.applyBlenderConfig).toHaveBeenCalledWith({
+        versionId: installedVersion.id,
+        configId: savedConfig.id,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Apply a config" }));
+
+    await screen.findByRole("dialog", { name: "Blender 4.2.3" });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await screen.findByText("Remove Studio?");
+    fireEvent.click(screen.getByRole("button", { name: "Remove config" }));
+
+    await waitFor(() => {
+      expect(apiMocks.removeBlenderConfig).toHaveBeenCalledWith(savedConfig.id);
     });
   });
 });

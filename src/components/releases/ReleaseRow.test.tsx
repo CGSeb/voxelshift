@@ -39,8 +39,9 @@ function makeInstallStatus(overrides: Partial<BlenderReleaseInstallProgress> = {
 }
 
 describe("ReleaseRow", () => {
-  it("renders installed releases with launch, favorite, and uninstall actions", () => {
+  it("renders installed releases with launch, config menu, favorite, and uninstall actions", () => {
     const onLaunchVersion = vi.fn();
+    const onOpenConfigs = vi.fn();
     const onToggleFavorite = vi.fn();
     const onOpenUninstall = vi.fn();
 
@@ -54,6 +55,7 @@ describe("ReleaseRow", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={onLaunchVersion}
+        onOpenConfigs={onOpenConfigs}
         onToggleFavorite={onToggleFavorite}
         onOpenUninstall={onOpenUninstall}
       />,
@@ -62,12 +64,48 @@ describe("ReleaseRow", () => {
     expect(screen.getByText("LTS")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Launch Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Save config" }));
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Apply a config" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove 4.2.3 from favorites" }));
     fireEvent.click(screen.getByText("Installed").closest("button") as HTMLElement);
 
     expect(onLaunchVersion).toHaveBeenCalledWith(installedVersion);
+    expect(onOpenConfigs).toHaveBeenNthCalledWith(1, installedVersion, "save");
+    expect(onOpenConfigs).toHaveBeenNthCalledWith(2, installedVersion, "apply");
     expect(onToggleFavorite).toHaveBeenCalledWith(download);
     expect(onOpenUninstall).toHaveBeenCalledWith(download);
+  });
+
+  it("closes the config menu on escape and outside clicks", () => {
+    render(
+      <ReleaseRow
+        download={download}
+        favoriteReleaseValues={[]}
+        installStatuses={{}}
+        installedReleaseVersions={new Map([[download.version, installedVersion]])}
+        isCurrentPlatformList
+        onInstall={vi.fn()}
+        onCancelInstall={vi.fn()}
+        onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
+        onToggleFavorite={vi.fn()}
+        onOpenUninstall={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    expect(screen.getByRole("menuitem", { name: "Save config" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("menuitem", { name: "Save config" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    expect(screen.getByRole("menuitem", { name: "Apply a config" })).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("menuitem", { name: "Apply a config" })).not.toBeInTheDocument();
   });
 
   it("shows install progress and cancel actions for active installs", () => {
@@ -83,6 +121,7 @@ describe("ReleaseRow", () => {
         onInstall={vi.fn()}
         onCancelInstall={onCancelInstall}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
@@ -95,8 +134,29 @@ describe("ReleaseRow", () => {
     expect(onCancelInstall).toHaveBeenCalledWith(download);
   });
 
-  it("shows current-os restrictions and experimental chip styles for other platforms", () => {
-    render(
+  it("shows candidate, beta, and default experimental chip styles", () => {
+    const { rerender } = render(
+      <ReleaseRow
+        download={{ ...download, channel: "Release Candidate" }}
+        favoriteReleaseValues={[]}
+        installStatuses={{ [download.id]: makeInstallStatus({ phase: "canceling", progressPercent: null, totalBytes: null }) }}
+        installedReleaseVersions={new Map()}
+        isCurrentPlatformList={false}
+        isExperimentalList
+        onInstall={vi.fn()}
+        onCancelInstall={vi.fn()}
+        onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
+        onToggleFavorite={vi.fn()}
+        onOpenUninstall={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Release Candidate")).toHaveClass("release-channel-chip-candidate");
+    expect(screen.getByRole("button", { name: "Current OS only" })).toBeDisabled();
+    expect(screen.queryByText("LTS")).not.toBeInTheDocument();
+
+    rerender(
       <ReleaseRow
         download={{ ...download, channel: "Beta" }}
         favoriteReleaseValues={[]}
@@ -107,14 +167,31 @@ describe("ReleaseRow", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
     );
 
     expect(screen.getByText("Beta")).toHaveClass("release-channel-chip-beta");
-    expect(screen.getByRole("button", { name: "Current OS only" })).toBeDisabled();
-    expect(screen.queryByText("LTS")).not.toBeInTheDocument();
+
+    rerender(
+      <ReleaseRow
+        download={{ ...download, channel: "Nightly" }}
+        favoriteReleaseValues={[]}
+        installStatuses={{ [download.id]: makeInstallStatus({ phase: "canceling", progressPercent: null, totalBytes: null }) }}
+        installedReleaseVersions={new Map()}
+        isCurrentPlatformList={false}
+        isExperimentalList
+        onInstall={vi.fn()}
+        onCancelInstall={vi.fn()}
+        onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
+        onToggleFavorite={vi.fn()}
+        onOpenUninstall={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Nightly")).toHaveClass("release-channel-chip");
   });
 });
-

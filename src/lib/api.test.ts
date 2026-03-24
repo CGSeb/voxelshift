@@ -8,7 +8,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   addScanRoot,
+  applyBlenderConfig,
   cancelBlenderReleaseInstall,
+  getBlenderConfigs,
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
@@ -17,8 +19,10 @@ import {
   launchBlenderProject,
   openVersionLocation,
   registerBlenderVersion,
+  removeBlenderConfig,
   removeBlenderVersion,
   removeScanRoot,
+  saveBlenderConfig,
   scanForBlenderVersions,
   setDefaultBlenderVersion,
 } from "./api";
@@ -38,6 +42,8 @@ describe("api wrappers", () => {
       fileName: "blender-4.2.3-windows-x64.zip",
       url: "https://download.blender.org/release/Blender4.2/blender-4.2.3-windows-x64.zip",
     };
+    const saveConfigPayload = { versionId: "version-1", name: "4.2.3" };
+    const applyConfigPayload = { versionId: "version-1", configId: "Studio" };
 
     await getLauncherState();
     await getRecentProjects();
@@ -53,6 +59,10 @@ describe("api wrappers", () => {
     await getBlenderReleaseDownloads();
     await installBlenderRelease(installPayload);
     await cancelBlenderReleaseInstall("release-1");
+    await getBlenderConfigs();
+    await saveBlenderConfig(saveConfigPayload);
+    await applyBlenderConfig(applyConfigPayload);
+    await removeBlenderConfig("Studio");
 
     expect(invokeMock.mock.calls).toEqual([
       ["get_launcher_state"],
@@ -69,6 +79,10 @@ describe("api wrappers", () => {
       ["get_blender_release_downloads"],
       ["install_blender_release", { request: installPayload }],
       ["cancel_blender_release_install", { id: "release-1" }],
+      ["get_blender_configs"],
+      ["save_blender_config", { request: saveConfigPayload }],
+      ["apply_blender_config", { request: applyConfigPayload }],
+      ["remove_blender_config", { configId: "Studio" }],
     ]);
   });
 });

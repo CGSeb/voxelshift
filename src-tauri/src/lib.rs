@@ -32,6 +32,7 @@ const BLENDER_BUILDER_CDN_URL: &str = "https://cdn.builder.blender.org/";
 const RELEASE_INSTALL_EVENT: &str = "release-install-progress";
 const VOXELSHIFT_DIR_NAME: &str = "VoxelShift";
 const STABLE_INSTALL_DIR_NAME: &str = "stable";
+const CONFIGS_DIR_NAME: &str = "configs";
 const TEMP_INSTALL_DIR_NAME: &str = ".tmp";
 const BLENDER_EXTENSION_DIR: &str = "portable/extensions/user_default/voxel_shift";
 const BLENDER_EXTENSION_INIT_FILE: &str = "__init__.py";
@@ -222,6 +223,29 @@ struct ReleaseInstallProgress {
     message: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlenderConfigProfile {
+    id: String,
+    name: String,
+    path: String,
+    updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveBlenderConfigRequest {
+    version_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyBlenderConfigRequest {
+    version_id: String,
+    config_id: String,
+}
+
 #[derive(Clone, Default)]
 struct ReleaseInstallControl {
     active_ids: Arc<Mutex<HashSet<String>>>,
@@ -320,6 +344,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_launcher_state,
             get_recent_projects,
+            get_blender_configs,
+            save_blender_config,
+            apply_blender_config,
+            remove_blender_config,
             scan_for_blender_versions,
             register_blender_version,
             remove_blender_version,
@@ -346,6 +374,41 @@ fn get_launcher_state(app: AppHandle) -> Result<LauncherState, String> {
 fn get_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
     let state = build_launcher_state(&app)?;
     Ok(collect_recent_projects(&state.versions))
+}
+
+#[tauri::command]
+fn get_blender_configs(app: AppHandle) -> Result<Vec<BlenderConfigProfile>, String> {
+    list_blender_configs(&configs_dir(&app)?)
+}
+
+#[tauri::command]
+fn save_blender_config(
+    app: AppHandle,
+    request: SaveBlenderConfigRequest,
+) -> Result<BlenderConfigProfile, String> {
+    let state = build_launcher_state(&app)?;
+    let version = resolve_launch_version(&state.versions, &request.version_id)?;
+    let source_dir = portable_config_dir(Path::new(&version.install_dir));
+    let default_name = default_blender_config_name(version);
+    let config_name = normalize_blender_config_name(&request.name, &default_name)?;
+
+    save_blender_config_snapshot(&source_dir, &configs_dir(&app)?, &config_name)
+}
+
+#[tauri::command]
+fn apply_blender_config(app: AppHandle, request: ApplyBlenderConfigRequest) -> Result<(), String> {
+    let state = build_launcher_state(&app)?;
+    let version = resolve_launch_version(&state.versions, &request.version_id)?;
+    let library_dir = configs_dir(&app)?;
+    let config_dir = resolve_blender_config_path(&library_dir, &request.config_id)?;
+    let target_dir = portable_config_dir(Path::new(&version.install_dir));
+
+    apply_blender_config_snapshot(&config_dir, &target_dir)
+}
+
+#[tauri::command]
+fn remove_blender_config(app: AppHandle, config_id: String) -> Result<(), String> {
+    remove_blender_config_snapshot(&configs_dir(&app)?, &config_id)
 }
 
 #[tauri::command]
@@ -2275,6 +2338,238 @@ fn stable_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(voxelshift_documents_dir(app)?.join(STABLE_INSTALL_DIR_NAME))
 }
 
+fn configs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(voxelshift_documents_dir(app)?.join(CONFIGS_DIR_NAME))
+}
+
+fn portable_config_dir(blender_install_dir: &Path) -> PathBuf {
+    blender_install_dir.join("portable").join("config")
+}
+
+fn default_blender_config_name(version: &BlenderVersion) -> String {
+    version
+        .version
+        .clone()
+        .unwrap_or_else(|| version.display_name.trim().to_string())
+}
+
+fn normalize_blender_config_name(value: &str, default_name: &str) -> Result<String, String> {
+    let requested =
+        trim_to_option(value.to_string()).unwrap_or_else(|| default_name.trim().to_string());
+    let sanitized = sanitize_blender_config_folder_name(&requested);
+
+    if sanitized.is_empty() {
+        return Err("Please provide a valid config name.".to_string());
+    }
+
+    Ok(sanitized)
+}
+
+fn sanitize_blender_config_folder_name(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            character if character.is_control() => '-',
+            character => character,
+        })
+        .collect::<String>();
+
+    sanitized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|character| character == '.' || character == ' ')
+        .to_string()
+}
+
+fn list_blender_configs(configs_dir: &Path) -> Result<Vec<BlenderConfigProfile>, String> {
+    if !configs_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut configs = Vec::new();
+    let entries = fs::read_dir(configs_dir)
+        .map_err(|error| format!("Unable to read the saved configs directory: {error}"))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        configs.push(build_blender_config_profile(&path)?);
+    }
+
+    configs.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+
+    Ok(configs)
+}
+
+fn build_blender_config_profile(config_dir: &Path) -> Result<BlenderConfigProfile, String> {
+    let name = config_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "The saved config folder name is invalid: {}",
+                path_to_string(config_dir)
+            )
+        })?;
+
+    Ok(BlenderConfigProfile {
+        id: name.clone(),
+        name,
+        path: path_to_string(config_dir),
+        updated_at: directory_modified_timestamp(config_dir),
+    })
+}
+
+fn directory_modified_timestamp(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
+        .unwrap_or(0)
+}
+
+fn save_blender_config_snapshot(
+    source_dir: &Path,
+    configs_dir: &Path,
+    config_name: &str,
+) -> Result<BlenderConfigProfile, String> {
+    if !source_dir.exists() || !source_dir.is_dir() {
+        return Err(
+            "No portable config folder was found for this Blender install yet.".to_string(),
+        );
+    }
+
+    fs::create_dir_all(configs_dir)
+        .map_err(|error| format!("Unable to prepare the saved configs directory: {error}"))?;
+
+    let target_dir = configs_dir.join(config_name);
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir).map_err(|error| {
+            format!("Unable to replace the saved config {config_name}: {error}")
+        })?;
+    }
+
+    copy_directory_contents(source_dir, &target_dir)?;
+    build_blender_config_profile(&target_dir)
+}
+
+fn apply_blender_config_snapshot(config_dir: &Path, target_dir: &Path) -> Result<(), String> {
+    if !config_dir.exists() || !config_dir.is_dir() {
+        return Err("That saved config could not be found.".to_string());
+    }
+
+    if target_dir.exists() {
+        fs::remove_dir_all(target_dir)
+            .map_err(|error| format!("Unable to clear the Blender config folder: {error}"))?;
+    }
+
+    if let Some(parent) = target_dir.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Unable to prepare the Blender portable folder: {error}"))?;
+    }
+
+    copy_directory_contents(config_dir, target_dir)
+}
+
+fn remove_blender_config_snapshot(configs_dir: &Path, config_id: &str) -> Result<(), String> {
+    let config_dir = resolve_blender_config_path(configs_dir, config_id)?;
+
+    fs::remove_dir_all(&config_dir).map_err(|error| {
+        format!(
+            "Unable to remove the saved config {}: {error}",
+            config_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(config_id)
+        )
+    })
+}
+
+fn resolve_blender_config_path(configs_dir: &Path, config_id: &str) -> Result<PathBuf, String> {
+    let trimmed = config_id.trim();
+    if trimmed.is_empty() {
+        return Err("The saved config is missing.".to_string());
+    }
+
+    if !configs_dir.exists() {
+        return Err("That saved config could not be found.".to_string());
+    }
+
+    let entries = fs::read_dir(configs_dir)
+        .map_err(|error| format!("Unable to read the saved configs directory: {error}"))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if name == trimmed || eq_ignore_case(name, trimmed) {
+            return Ok(path);
+        }
+    }
+
+    Err("That saved config could not be found.".to_string())
+}
+
+fn copy_directory_contents(source_dir: &Path, target_dir: &Path) -> Result<(), String> {
+    if !source_dir.exists() || !source_dir.is_dir() {
+        return Err(format!(
+            "The config source directory is missing: {}",
+            path_to_string(source_dir)
+        ));
+    }
+
+    fs::create_dir_all(target_dir)
+        .map_err(|error| format!("Unable to create the target config directory: {error}"))?;
+
+    let entries = fs::read_dir(source_dir)
+        .map_err(|error| format!("Unable to read the config directory: {error}"))?;
+
+    for entry in entries.flatten() {
+        let source_path = entry.path();
+        let target_path = target_dir.join(entry.file_name());
+
+        if source_path.is_dir() {
+            copy_directory_contents(&source_path, &target_path)?;
+            continue;
+        }
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Unable to prepare the config directory tree: {error}"))?;
+        }
+
+        fs::copy(&source_path, &target_path).map_err(|error| {
+            format!(
+                "Unable to copy {} into {}: {error}",
+                path_to_string(&source_path),
+                path_to_string(&target_path)
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn remove_managed_install_dir(app: &AppHandle, version: &BlenderVersion) -> Result<(), String> {
     let stable_dir = stable_install_dir(app)?;
     let install_dir = PathBuf::from(&version.install_dir);
@@ -3524,5 +3819,199 @@ mod tests {
             validate_project_launch_path(project_path.to_str().unwrap()).unwrap(),
             project_path
         );
+    }
+    #[test]
+    fn normalizes_and_resolves_blender_config_names() {
+        assert_eq!(
+            normalize_blender_config_name("  Blender:4.2?  ", "4.2.3").unwrap(),
+            "Blender-4.2-".to_string()
+        );
+        assert_eq!(
+            normalize_blender_config_name("   ", "4.2.3").unwrap(),
+            "4.2.3".to_string()
+        );
+
+        let sandbox = TestDir::new("config-resolve");
+        let configs_dir = sandbox.path().join("configs");
+        let config_dir = configs_dir.join("Studio Config");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        assert_eq!(
+            resolve_blender_config_path(&configs_dir, "studio config").unwrap(),
+            config_dir
+        );
+    }
+
+    #[test]
+    fn saves_lists_and_applies_blender_configs() {
+        let sandbox = TestDir::new("blender-configs");
+        let source_dir = sandbox
+            .path()
+            .join("Blender 4.2")
+            .join("portable")
+            .join("config");
+        fs::create_dir_all(source_dir.join("scripts").join("startup")).unwrap();
+        fs::write(source_dir.join("userpref.blend"), b"userpref").unwrap();
+        fs::write(
+            source_dir.join("scripts").join("startup").join("theme.py"),
+            b"theme",
+        )
+        .unwrap();
+
+        let configs_dir = sandbox.path().join("configs");
+        let config_name = normalize_blender_config_name("  Blender:4.2?  ", "4.2.3").unwrap();
+        let saved = save_blender_config_snapshot(&source_dir, &configs_dir, &config_name).unwrap();
+        assert_eq!(saved.name, config_name.as_str());
+
+        let listed = list_blender_configs(&configs_dir).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, saved.id);
+
+        let target_dir = sandbox
+            .path()
+            .join("Blender 4.3")
+            .join("portable")
+            .join("config");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("old.txt"), b"old").unwrap();
+
+        apply_blender_config_snapshot(&configs_dir.join(&config_name), &target_dir).unwrap();
+
+        assert_eq!(
+            fs::read(target_dir.join("userpref.blend")).unwrap(),
+            b"userpref"
+        );
+        assert_eq!(
+            fs::read(target_dir.join("scripts").join("startup").join("theme.py")).unwrap(),
+            b"theme"
+        );
+        assert!(!target_dir.join("old.txt").exists());
+        assert!(matches!(
+            save_blender_config_snapshot(&sandbox.path().join("missing"), &configs_dir, "4.2"),
+            Err(message) if message == "No portable config folder was found for this Blender install yet."
+        ));
+    }
+
+    #[test]
+    fn removes_saved_blender_configs() {
+        let sandbox = TestDir::new("remove-blender-config");
+        let configs_dir = sandbox.path().join("configs");
+        let config_dir = configs_dir.join("Studio");
+        fs::create_dir_all(config_dir.join("scripts")).unwrap();
+        fs::write(config_dir.join("userpref.blend"), b"userpref").unwrap();
+
+        remove_blender_config_snapshot(&configs_dir, "studio").unwrap();
+        assert!(!config_dir.exists());
+        assert!(matches!(
+            remove_blender_config_snapshot(&configs_dir, "missing"),
+            Err(message) if message == "That saved config could not be found."
+        ));
+    }
+    #[test]
+    fn config_name_helpers_and_profiles_cover_edge_cases() {
+        let version = make_version(" Blender Daily ", None, true, false);
+        assert_eq!(default_blender_config_name(&version), "Blender Daily");
+        assert_eq!(
+            sanitize_blender_config_folder_name(" .. Studio/Config* .. "),
+            "Studio-Config-".to_string()
+        );
+        assert_eq!(
+            normalize_blender_config_name(" .. ", "   "),
+            Err("Please provide a valid config name.".to_string())
+        );
+        assert!(matches!(
+            build_blender_config_profile(Path::new("")),
+            Err(message) if message.contains("invalid")
+        ));
+        assert_eq!(directory_modified_timestamp(Path::new("missing-config")), 0);
+    }
+
+    #[test]
+    fn config_listing_and_resolution_ignore_files_and_sort_newest_first() {
+        let sandbox = TestDir::new("config-listing");
+        let configs_dir = sandbox.path().join("configs");
+        fs::create_dir_all(&configs_dir).unwrap();
+        fs::write(configs_dir.join("README.txt"), b"note").unwrap();
+
+        let older_dir = configs_dir.join("Alpha");
+        fs::create_dir_all(&older_dir).unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        let newer_dir = configs_dir.join("Beta");
+        fs::create_dir_all(&newer_dir).unwrap();
+
+        let listed = list_blender_configs(&configs_dir).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, "Beta");
+        assert_eq!(listed[1].id, "Alpha");
+        assert!(list_blender_configs(&sandbox.path().join("missing"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            resolve_blender_config_path(&configs_dir, "beta").unwrap(),
+            newer_dir
+        );
+        assert_eq!(
+            resolve_blender_config_path(&configs_dir, "README.txt"),
+            Err("That saved config could not be found.".to_string())
+        );
+    }
+
+    #[test]
+    fn config_snapshot_helpers_replace_existing_targets_and_validate_inputs() {
+        let sandbox = TestDir::new("config-snapshot-helpers");
+        let source_dir = sandbox
+            .path()
+            .join("source")
+            .join("portable")
+            .join("config");
+        fs::create_dir_all(source_dir.join("scripts").join("startup")).unwrap();
+        fs::write(source_dir.join("userpref.blend"), b"userpref").unwrap();
+        fs::write(
+            source_dir.join("scripts").join("startup").join("theme.py"),
+            b"theme",
+        )
+        .unwrap();
+
+        let configs_dir = sandbox.path().join("configs");
+        let existing_dir = configs_dir.join("Studio");
+        fs::create_dir_all(&existing_dir).unwrap();
+        fs::write(existing_dir.join("old.txt"), b"old").unwrap();
+
+        let saved = save_blender_config_snapshot(&source_dir, &configs_dir, "Studio").unwrap();
+        assert_eq!(saved.id, "Studio");
+        assert!(!existing_dir.join("old.txt").exists());
+
+        let applied_target = sandbox
+            .path()
+            .join("target")
+            .join("portable")
+            .join("config");
+        apply_blender_config_snapshot(&configs_dir.join("Studio"), &applied_target).unwrap();
+        assert_eq!(
+            fs::read(applied_target.join("userpref.blend")).unwrap(),
+            b"userpref"
+        );
+        assert_eq!(
+            fs::read(
+                applied_target
+                    .join("scripts")
+                    .join("startup")
+                    .join("theme.py")
+            )
+            .unwrap(),
+            b"theme"
+        );
+        assert_eq!(
+            apply_blender_config_snapshot(&sandbox.path().join("missing"), &applied_target),
+            Err("That saved config could not be found.".to_string())
+        );
+        assert_eq!(
+            resolve_blender_config_path(&configs_dir, "   "),
+            Err("The saved config is missing.".to_string())
+        );
+        assert!(matches!(
+            copy_directory_contents(&sandbox.path().join("missing-source"), &applied_target),
+            Err(message) if message.contains("The config source directory is missing")
+        ));
     }
 }

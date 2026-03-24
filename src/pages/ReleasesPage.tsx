@@ -19,6 +19,7 @@ interface ReleasesPageProps {
   onInstall: (download: BlenderReleaseDownload) => void;
   onCancelInstall: (download: BlenderReleaseDownload) => void;
   onLaunchVersion: (version: BlenderVersion) => void;
+  onOpenConfigs: (version: BlenderVersion, mode: "save" | "apply") => void;
   onToggleFavorite: (download: BlenderReleaseDownload) => void;
   onOpenUninstall: (download: BlenderReleaseDownload) => void;
 }
@@ -38,6 +39,7 @@ interface ReleaseListProps {
   onInstall: (download: BlenderReleaseDownload) => void;
   onCancelInstall: (download: BlenderReleaseDownload) => void;
   onLaunchVersion: (version: BlenderVersion) => void;
+  onOpenConfigs: (version: BlenderVersion, mode: "save" | "apply") => void;
   onToggleFavorite: (download: BlenderReleaseDownload) => void;
   onOpenUninstall: (download: BlenderReleaseDownload) => void;
 }
@@ -55,6 +57,7 @@ function ReleaseList({
   onInstall,
   onCancelInstall,
   onLaunchVersion,
+  onOpenConfigs,
   onToggleFavorite,
   onOpenUninstall,
 }: ReleaseListProps) {
@@ -89,6 +92,7 @@ function ReleaseList({
             onInstall={onInstall}
             onCancelInstall={onCancelInstall}
             onLaunchVersion={onLaunchVersion}
+            onOpenConfigs={onOpenConfigs}
             onToggleFavorite={onToggleFavorite}
             onOpenUninstall={onOpenUninstall}
           />
@@ -110,6 +114,7 @@ export function ReleasesPage({
   onInstall,
   onCancelInstall,
   onLaunchVersion,
+  onOpenConfigs,
   onToggleFavorite,
   onOpenUninstall,
 }: ReleasesPageProps) {
@@ -191,6 +196,7 @@ export function ReleasesPage({
           onInstall={onInstall}
           onCancelInstall={onCancelInstall}
           onLaunchVersion={onLaunchVersion}
+          onOpenConfigs={onOpenConfigs}
           onToggleFavorite={onToggleFavorite}
           onOpenUninstall={onOpenUninstall}
         />
@@ -208,6 +214,7 @@ export function ReleasesPage({
           onInstall={onInstall}
           onCancelInstall={onCancelInstall}
           onLaunchVersion={onLaunchVersion}
+          onOpenConfigs={onOpenConfigs}
           onToggleFavorite={onToggleFavorite}
           onOpenUninstall={onOpenUninstall}
         />
