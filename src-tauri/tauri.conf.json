@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.voxelshift.app",
   "build": {
-    "beforeDevCommand": "npm.cmd run dev",
-    "beforeBuildCommand": "npm.cmd run build",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -58,4 +58,3 @@
     }
   }
 }
-

@@ -40,20 +40,20 @@ It is aimed at artists and technical users who keep multiple Blender installs ar
 ### Run The App
 
 ```powershell
-npm.cmd install
-npm.cmd run tauri dev
+npm install
+npm run tauri dev
 ```
 
 ### Frontend Build
 
 ```powershell
-npm.cmd run build
+npm run build
 ```
 
 ### Desktop Build
 
 ```powershell
-npm.cmd run tauri build
+npm run tauri build
 ```
 
 ## Repository Layout
