@@ -1,7 +1,7 @@
 # Voxel Shift
 
 [![Coverage Status](https://coveralls.io/repos/github/CGSeb/voxelshift/badge.svg?branch=main&id=2)](https://coveralls.io/github/CGSeb/voxelshift?branch=main)
-[![Latest Version](https://img.shields.io/github/v/release/CGSeb/voxelshift?display_name=tag)](https://github.com/CGSeb/voxelshift/releases/latest)
+[![Latest Version](https://img.shields.io/github/v/release/CGSeb/voxelshift?display_name=tag&id=1)](https://github.com/CGSeb/voxelshift/releases/latest)
 
 Voxel Shift is an open source desktop launcher for Blender, built with Tauri, React, TypeScript, and Rust.
 
