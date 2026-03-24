@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BlenderReleaseListing, LauncherState, RecentProject } from "../types";
+import type { BlenderConfigProfile, BlenderReleaseListing, LauncherState, RecentProject } from "../types";
 
 interface RegisterPayload {
   path: string;
@@ -21,6 +21,16 @@ interface InstallReleasePayload {
   version: string;
   fileName: string;
   url: string;
+}
+
+interface SaveBlenderConfigPayload {
+  versionId: string;
+  name: string;
+}
+
+interface ApplyBlenderConfigPayload {
+  versionId: string;
+  configId: string;
 }
 
 export function getLauncherState() {
@@ -77,4 +87,20 @@ export function installBlenderRelease(payload: InstallReleasePayload) {
 
 export function cancelBlenderReleaseInstall(id: string) {
   return invoke<void>("cancel_blender_release_install", { id });
+}
+
+export function getBlenderConfigs() {
+  return invoke<BlenderConfigProfile[]>("get_blender_configs");
+}
+
+export function saveBlenderConfig(payload: SaveBlenderConfigPayload) {
+  return invoke<BlenderConfigProfile>("save_blender_config", { request: payload });
+}
+
+export function applyBlenderConfig(payload: ApplyBlenderConfigPayload) {
+  return invoke<void>("apply_blender_config", { request: payload });
+}
+
+export function removeBlenderConfig(configId: string) {
+  return invoke<void>("remove_blender_config", { configId });
 }

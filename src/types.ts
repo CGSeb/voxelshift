@@ -63,3 +63,10 @@ export interface BlenderReleaseInstallProgress {
   installDir: string | null;
   message: string;
 }
+
+export interface BlenderConfigProfile {
+  id: string;
+  name: string;
+  path: string;
+  updatedAt: number;
+}

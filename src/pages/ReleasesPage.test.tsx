@@ -63,6 +63,7 @@ describe("ReleasesPage", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
@@ -89,6 +90,7 @@ describe("ReleasesPage", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
@@ -115,6 +117,7 @@ describe("ReleasesPage", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
@@ -135,6 +138,7 @@ describe("ReleasesPage", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
@@ -157,6 +161,7 @@ describe("ReleasesPage", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,
@@ -179,6 +184,7 @@ describe("ReleasesPage", () => {
         onInstall={vi.fn()}
         onCancelInstall={vi.fn()}
         onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
         onToggleFavorite={vi.fn()}
         onOpenUninstall={vi.fn()}
       />,

@@ -3,23 +3,29 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useEffectEvent, useState } from "react";
 import { AppUpdateToast } from "./components/AppUpdateToast";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ReleaseConfigDialog } from "./components/releases/ReleaseConfigDialog";
 import { AppFooter } from "./components/layout/AppFooter";
 import { AppLayout } from "./components/layout/AppLayout";
 import type { PageKey } from "./components/layout/AppMenu";
 import {
+  applyBlenderConfig,
   cancelBlenderReleaseInstall,
+  getBlenderConfigs,
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
   installBlenderRelease,
   launchBlender,
   launchBlenderProject,
+  removeBlenderConfig,
   removeBlenderVersion,
+  saveBlenderConfig,
 } from "./lib/api";
 import { checkForAppUpdate, type AppUpdate, type AppUpdateDownloadEvent, type AppUpdateInfo } from "./lib/updater";
 import { HomePage } from "./pages/HomePage";
 import { ReleasesPage } from "./pages/ReleasesPage";
 import type {
+  BlenderConfigProfile,
   BlenderReleaseDownload,
   BlenderReleaseInstallProgress,
   BlenderReleaseListing,
@@ -35,6 +41,7 @@ const installCanceledMessage = "Installation canceled.";
 
 type AppUpdatePhase = "checking" | "idle" | "available" | "downloading" | "installing" | "completed" | "failed" | "unavailable";
 type AppFooterTone = "neutral" | "success" | "warning" | "danger";
+type ConfigDialogMode = "save" | "apply";
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string; description: string }> = {
   home: {
@@ -151,6 +158,10 @@ function isManagedInstall(version: BlenderVersion) {
   return normalizedInstallDir.includes("/voxelshift/stable/");
 }
 
+function defaultConfigNameForVersion(version: BlenderVersion) {
+  return version.version ?? version.displayName;
+}
+
 export default function App() {
   const [activePage, setActivePage] = useState<PageKey>("home");
   const [releaseListing, setReleaseListing] = useState<BlenderReleaseListing | null>(null);
@@ -165,6 +176,17 @@ export default function App() {
   const [pendingUninstallDownload, setPendingUninstallDownload] = useState<BlenderReleaseDownload | null>(null);
   const [isRemovingVersion, setIsRemovingVersion] = useState(false);
   const [removeVersionError, setRemoveVersionError] = useState<string | null>(null);
+  const [activeConfigVersion, setActiveConfigVersion] = useState<BlenderVersion | null>(null);
+  const [activeConfigDialogMode, setActiveConfigDialogMode] = useState<ConfigDialogMode | null>(null);
+  const [blenderConfigs, setBlenderConfigs] = useState<BlenderConfigProfile[]>([]);
+  const [blenderConfigName, setBlenderConfigName] = useState("");
+  const [blenderConfigError, setBlenderConfigError] = useState<string | null>(null);
+  const [blenderConfigNotice, setBlenderConfigNotice] = useState<string | null>(null);
+  const [isLoadingBlenderConfigs, setIsLoadingBlenderConfigs] = useState(false);
+  const [isSavingBlenderConfig, setIsSavingBlenderConfig] = useState(false);
+  const [applyingBlenderConfigId, setApplyingBlenderConfigId] = useState<string | null>(null);
+  const [pendingRemoveBlenderConfig, setPendingRemoveBlenderConfig] = useState<BlenderConfigProfile | null>(null);
+  const [isRemovingBlenderConfig, setIsRemovingBlenderConfig] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
   const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -581,6 +603,127 @@ export default function App() {
     setRemoveVersionError(null);
   }
 
+  async function loadBlenderConfigs() {
+    setIsLoadingBlenderConfigs(true);
+
+    try {
+      const nextConfigs = await getBlenderConfigs();
+      setBlenderConfigs(nextConfigs);
+      setBlenderConfigError(null);
+    } catch (error) {
+      setBlenderConfigs([]);
+      setBlenderConfigError(readErrorMessage(error, "Could not load saved Blender configs."));
+    } finally {
+      setIsLoadingBlenderConfigs(false);
+    }
+  }
+
+  function openConfigDialog(version: BlenderVersion, mode: ConfigDialogMode) {
+    setActiveConfigVersion(version);
+    setActiveConfigDialogMode(mode);
+    setBlenderConfigs([]);
+    setBlenderConfigName(defaultConfigNameForVersion(version));
+    setBlenderConfigError(null);
+    setBlenderConfigNotice(null);
+    if (mode === "apply") {
+      void loadBlenderConfigs();
+    }
+  }
+
+  function closeConfigDialog() {
+    if (isSavingBlenderConfig || applyingBlenderConfigId !== null || isRemovingBlenderConfig) {
+      return;
+    }
+
+    setActiveConfigVersion(null);
+    setActiveConfigDialogMode(null);
+    setPendingRemoveBlenderConfig(null);
+    setBlenderConfigError(null);
+    setBlenderConfigNotice(null);
+  }
+
+  function requestRemoveBlenderConfig(config: BlenderConfigProfile) {
+    setPendingRemoveBlenderConfig(config);
+    setBlenderConfigError(null);
+    setBlenderConfigNotice(null);
+  }
+
+  function closeRemoveBlenderConfigDialog() {
+    if (isRemovingBlenderConfig) {
+      return;
+    }
+
+    setPendingRemoveBlenderConfig(null);
+  }
+
+  async function saveCurrentBlenderConfig() {
+    if (!activeConfigVersion) {
+      return;
+    }
+
+    setIsSavingBlenderConfig(true);
+    setBlenderConfigError(null);
+    setBlenderConfigNotice(null);
+
+    try {
+      const savedConfig = await saveBlenderConfig({
+        versionId: activeConfigVersion.id,
+        name: blenderConfigName,
+      });
+      setBlenderConfigName(savedConfig.name);
+      setBlenderConfigNotice(`Saved ${savedConfig.name}.`);
+    } catch (error) {
+      setBlenderConfigError(readErrorMessage(error, `Could not save Blender ${defaultConfigNameForVersion(activeConfigVersion)} config.`));
+    } finally {
+      setIsSavingBlenderConfig(false);
+    }
+  }
+
+  async function applySavedBlenderConfig(config: BlenderConfigProfile) {
+    if (!activeConfigVersion) {
+      return;
+    }
+
+    setApplyingBlenderConfigId(config.id);
+    setBlenderConfigError(null);
+    setBlenderConfigNotice(null);
+
+    try {
+      await applyBlenderConfig({
+        versionId: activeConfigVersion.id,
+        configId: config.id,
+      });
+      setActiveConfigVersion(null);
+      setActiveConfigDialogMode(null);
+      setPendingRemoveBlenderConfig(null);
+    } catch (error) {
+      setBlenderConfigError(readErrorMessage(error, `Could not apply ${config.name}.`));
+    } finally {
+      setApplyingBlenderConfigId(null);
+    }
+  }
+
+  async function confirmRemoveBlenderConfig() {
+    if (!pendingRemoveBlenderConfig) {
+      return;
+    }
+
+    setIsRemovingBlenderConfig(true);
+    setBlenderConfigError(null);
+    setBlenderConfigNotice(null);
+
+    try {
+      await removeBlenderConfig(pendingRemoveBlenderConfig.id);
+      setPendingRemoveBlenderConfig(null);
+      setBlenderConfigNotice(`Removed ${pendingRemoveBlenderConfig.name}.`);
+      setBlenderConfigs(await getBlenderConfigs());
+    } catch (error) {
+      setBlenderConfigError(readErrorMessage(error, `Could not remove ${pendingRemoveBlenderConfig.name}.`));
+    } finally {
+      setIsRemovingBlenderConfig(false);
+    }
+  }
+
   async function installAvailableAppUpdate() {
     if (!appUpdate || (appUpdatePhase !== "available" && appUpdatePhase !== "failed")) {
       return;
@@ -793,6 +936,7 @@ export default function App() {
             onInstall={(download) => void installRelease(download)}
             onCancelInstall={(download) => void cancelInstall(download)}
             onLaunchVersion={(version) => void launchInstalledRelease(version)}
+            onOpenConfigs={(version, mode) => void openConfigDialog(version, mode)}
             onToggleFavorite={toggleFavorite}
             onOpenUninstall={openUninstallDialog}
           />
@@ -813,6 +957,41 @@ export default function App() {
           onClose={closeAppUpdateToast}
         />
       ) : null}
+
+      <ReleaseConfigDialog
+        open={activeConfigVersion !== null && activeConfigDialogMode !== null}
+        mode={activeConfigDialogMode ?? "save"}
+        version={activeConfigVersion}
+        configs={blenderConfigs}
+        configName={blenderConfigName}
+        isLoading={isLoadingBlenderConfigs}
+        isSaving={isSavingBlenderConfig}
+        applyingConfigId={applyingBlenderConfigId}
+        deletingConfigId={isRemovingBlenderConfig ? pendingRemoveBlenderConfig?.id ?? null : null}
+        errorMessage={blenderConfigError}
+        noticeMessage={blenderConfigNotice}
+        onConfigNameChange={setBlenderConfigName}
+        onSave={() => void saveCurrentBlenderConfig()}
+        onApply={(config) => void applySavedBlenderConfig(config)}
+        onRequestRemove={requestRemoveBlenderConfig}
+        onClose={closeConfigDialog}
+      />
+
+      <ConfirmDialog
+        open={pendingRemoveBlenderConfig !== null}
+        title={pendingRemoveBlenderConfig ? `Remove ${pendingRemoveBlenderConfig.name}?` : "Remove config?"}
+        description={
+          pendingRemoveBlenderConfig
+            ? `This will permanently remove the saved config ${pendingRemoveBlenderConfig.name} from Documents/VoxelShift/configs.`
+            : "This will permanently remove the saved config."
+        }
+        errorMessage={blenderConfigError}
+        confirmLabel="Remove config"
+        cancelLabel="Keep it"
+        isConfirming={isRemovingBlenderConfig}
+        onConfirm={confirmRemoveBlenderConfig}
+        onCancel={closeRemoveBlenderConfigDialog}
+      />
 
       <ConfirmDialog
         open={pendingUninstallDownload !== null}
@@ -837,4 +1016,6 @@ export default function App() {
     </>
   );
 }
+
+
 
