@@ -2,10 +2,12 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useEffectEvent, useState } from "react";
 import { AppUpdateToast } from "./components/AppUpdateToast";
+import { BlenderLogsDialog } from "./components/BlenderLogsDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ReleaseConfigDialog } from "./components/releases/ReleaseConfigDialog";
 import { AppFooter } from "./components/layout/AppFooter";
 import { AppLayout } from "./components/layout/AppLayout";
+import { RunningBlenderTray } from "./components/layout/RunningBlenderTray";
 import type { PageKey } from "./components/layout/AppMenu";
 import {
   applyBlenderConfig,
@@ -14,29 +16,38 @@ import {
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
+  getRunningBlenderLogs,
+  getRunningBlenders,
   installBlenderRelease,
   launchBlender,
   launchBlenderProject,
   removeBlenderConfig,
   removeBlenderVersion,
   saveBlenderConfig,
+  stopRunningBlender,
 } from "./lib/api";
 import { checkForAppUpdate, type AppUpdate, type AppUpdateDownloadEvent, type AppUpdateInfo } from "./lib/updater";
 import { HomePage } from "./pages/HomePage";
 import { ReleasesPage } from "./pages/ReleasesPage";
 import type {
   BlenderConfigProfile,
+  BlenderLogEntry,
+  BlenderLogEvent,
   BlenderReleaseDownload,
   BlenderReleaseInstallProgress,
   BlenderReleaseListing,
+  BlenderSession,
   BlenderVersion,
   LauncherState,
   RecentProject,
   ReleaseInstallPhase,
+  RunningBlenderProcess,
 } from "./types";
 
 const favoriteReleaseStorageKey = "voxelshift.favorite-release-downloads";
 const releaseInstallEvent = "release-install-progress";
+const runningBlendersEvent = "running-blenders-updated";
+const runningBlenderLogEvent = "running-blender-log";
 const installCanceledMessage = "Installation canceled.";
 
 type AppUpdatePhase = "checking" | "idle" | "available" | "downloading" | "installing" | "completed" | "failed" | "unavailable";
@@ -162,6 +173,108 @@ function defaultConfigNameForVersion(version: BlenderVersion) {
   return version.version ?? version.displayName;
 }
 
+const maxClosedBlenderSessionsPerProjectVersion = 1;
+
+function normalizeBlenderSessionProjectPath(projectPath: string | null) {
+  if (!projectPath) {
+    return "";
+  }
+
+  return projectPath.replaceAll("/", "\\").trim().toLowerCase();
+}
+
+function makeBlenderSessionGroupKey(
+  process: Pick<RunningBlenderProcess, "blenderVersion" | "blenderDisplayName" | "projectPath">,
+) {
+  const versionKey = process.blenderVersion ?? process.blenderDisplayName;
+  const projectKey = normalizeBlenderSessionProjectPath(process.projectPath);
+  return `${versionKey}::${projectKey}`;
+}
+
+function getBlenderSessionSortTimestamp(session: BlenderSession) {
+  return session.isRunning ? session.startedAt : session.closedAt ?? session.startedAt;
+}
+
+function sortBlenderSessions(left: BlenderSession, right: BlenderSession) {
+  if (left.isRunning !== right.isRunning) {
+    return left.isRunning ? -1 : 1;
+  }
+
+  const timestampDifference = getBlenderSessionSortTimestamp(right) - getBlenderSessionSortTimestamp(left);
+  if (timestampDifference !== 0) {
+    return timestampDifference;
+  }
+
+  return right.startedAt - left.startedAt;
+}
+
+function limitBlenderSessions(sessions: BlenderSession[]) {
+  const groupedSessions = new Map<string, BlenderSession[]>();
+
+  for (const session of [...sessions].sort(sortBlenderSessions)) {
+    const groupKey = makeBlenderSessionGroupKey(session);
+    const group = groupedSessions.get(groupKey);
+    if (group) {
+      group.push(session);
+      continue;
+    }
+
+    groupedSessions.set(groupKey, [session]);
+  }
+
+  const limitedSessions: BlenderSession[] = [];
+
+  for (const group of groupedSessions.values()) {
+    const runningSessions = group.filter((session) => session.isRunning);
+    const closedSessions = group.filter((session) => !session.isRunning);
+
+    limitedSessions.push(...runningSessions, ...closedSessions.slice(0, maxClosedBlenderSessionsPerProjectVersion));
+  }
+
+  return limitedSessions.sort(sortBlenderSessions);
+}
+
+function mergeBlenderSessions(currentSessions: BlenderSession[], runningProcesses: RunningBlenderProcess[]) {
+  const nextSessions = new Map<string, BlenderSession>();
+
+  for (const session of currentSessions) {
+    nextSessions.set(session.instanceId, {
+      ...session,
+      logs: [...session.logs],
+    });
+  }
+
+  const runningIds = new Set(runningProcesses.map((process) => process.instanceId));
+
+  for (const process of runningProcesses) {
+    const existingSession = nextSessions.get(process.instanceId);
+    nextSessions.set(process.instanceId, {
+      ...existingSession,
+      ...process,
+      isRunning: true,
+      closedAt: null,
+      logs: existingSession?.logs ?? [],
+    });
+  }
+
+  const closedAt = Math.floor(Date.now() / 1000);
+
+  for (const [instanceId, session] of nextSessions.entries()) {
+    if (runningIds.has(instanceId) || !session.isRunning) {
+      continue;
+    }
+
+    nextSessions.set(instanceId, {
+      ...session,
+      isRunning: false,
+      isStopping: false,
+      closedAt: session.closedAt ?? closedAt,
+    });
+  }
+
+  return limitBlenderSessions([...nextSessions.values()]);
+}
+
 export default function App() {
   const [activePage, setActivePage] = useState<PageKey>("home");
   const [releaseListing, setReleaseListing] = useState<BlenderReleaseListing | null>(null);
@@ -196,6 +309,13 @@ export default function App() {
   const [appUpdateDownloadedBytes, setAppUpdateDownloadedBytes] = useState(0);
   const [appUpdateTotalBytes, setAppUpdateTotalBytes] = useState<number | null>(null);
   const [appUpdateProgressPercent, setAppUpdateProgressPercent] = useState<number | null>(null);
+  const [runningBlenders, setRunningBlenders] = useState<RunningBlenderProcess[]>([]);
+  const [blenderSessions, setBlenderSessions] = useState<BlenderSession[]>([]);
+  const [isRunningBlenderTrayOpen, setIsRunningBlenderTrayOpen] = useState(false);
+  const [activeLogsProcessId, setActiveLogsProcessId] = useState<string | null>(null);
+  const [pendingStopBlenderId, setPendingStopBlenderId] = useState<string | null>(null);
+  const [stopBlenderError, setStopBlenderError] = useState<string | null>(null);
+  const [stoppingBlenderId, setStoppingBlenderId] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -223,6 +343,102 @@ export default function App() {
     }
 
     void subscribeToInstallProgress();
+
+    return () => {
+      isDisposed = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    async function loadRunningBlenders() {
+      try {
+        const processes = await getRunningBlenders();
+        if (!isDisposed) {
+          setRunningBlenders(processes);
+          setBlenderSessions((current) => mergeBlenderSessions(current, processes));
+        }
+      } catch {
+        if (!isDisposed) {
+          setRunningBlenders([]);
+          setBlenderSessions((current) => mergeBlenderSessions(current, []));
+        }
+      }
+    }
+
+    void loadRunningBlenders();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
+
+  const handleRunningBlenderLogEvent = useEffectEvent((payload: BlenderLogEvent) => {
+    setBlenderSessions((current) => {
+      const sessionIndex = current.findIndex((session) => session.instanceId === payload.instanceId);
+      if (sessionIndex === -1) {
+        return current;
+      }
+
+      const session = current[sessionIndex];
+      if (session.logs.some((entry) => entry.id === payload.entry.id)) {
+        return current;
+      }
+
+      const nextSessions = [...current];
+      nextSessions[sessionIndex] = {
+        ...session,
+        logs: [...session.logs, payload.entry],
+      };
+
+      return limitBlenderSessions(nextSessions);
+    });
+  });
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let isDisposed = false;
+
+    async function subscribeToRunningBlenders() {
+      unlisten = await listen<RunningBlenderProcess[]>(runningBlendersEvent, (event) => {
+        if (isDisposed) {
+          return;
+        }
+
+        setRunningBlenders(event.payload);
+        setBlenderSessions((current) => mergeBlenderSessions(current, event.payload));
+      });
+    }
+
+    void subscribeToRunningBlenders();
+
+    return () => {
+      isDisposed = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let isDisposed = false;
+
+    async function subscribeToRunningBlenderLogs() {
+      unlisten = await listen<BlenderLogEvent>(runningBlenderLogEvent, (event) => {
+        if (isDisposed) {
+          return;
+        }
+
+        handleRunningBlenderLogEvent(event.payload);
+      });
+    }
+
+    void subscribeToRunningBlenderLogs();
 
     return () => {
       isDisposed = true;
@@ -589,6 +805,99 @@ export default function App() {
     }
   }
 
+  async function openRunningBlenderLogs(process: BlenderSession) {
+    setActiveLogsProcessId(process.instanceId);
+
+    if (!process.isRunning) {
+      return;
+    }
+
+    try {
+      const logs = await getRunningBlenderLogs(process.instanceId);
+      setBlenderSessions((current) => {
+        const sessionIndex = current.findIndex((session) => session.instanceId === process.instanceId);
+        if (sessionIndex === -1) {
+          return current;
+        }
+
+        const session = current[sessionIndex];
+        const mergedLogs = new Map<string, BlenderLogEntry>();
+
+        for (const entry of [...session.logs, ...logs]) {
+          mergedLogs.set(entry.id, entry);
+        }
+
+        const nextSessions = [...current];
+        nextSessions[sessionIndex] = {
+          ...session,
+          logs: [...mergedLogs.values()].sort((left, right) => left.timestamp - right.timestamp),
+        };
+
+        return limitBlenderSessions(nextSessions);
+      });
+    } catch (error) {
+      const errorEntry: BlenderLogEntry = {
+        id: `${process.instanceId}-log-error-${Date.now()}`,
+        instanceId: process.instanceId,
+        source: "system",
+        message: readErrorMessage(error, "Could not load Blender logs."),
+        timestamp: Math.floor(Date.now() / 1000),
+      };
+
+      setBlenderSessions((current) => {
+        const sessionIndex = current.findIndex((session) => session.instanceId === process.instanceId);
+        if (sessionIndex === -1) {
+          return current;
+        }
+
+        const session = current[sessionIndex];
+        const nextSessions = [...current];
+        nextSessions[sessionIndex] = {
+          ...session,
+          logs: [...session.logs, errorEntry],
+        };
+
+        return limitBlenderSessions(nextSessions);
+      });
+    }
+  }
+
+  function closeRunningBlenderLogs() {
+    setActiveLogsProcessId(null);
+  }
+
+  function openStopBlenderDialog(process: BlenderSession) {
+    setPendingStopBlenderId(process.instanceId);
+    setStopBlenderError(null);
+  }
+
+  function closeStopBlenderDialog() {
+    if (stoppingBlenderId !== null) {
+      return;
+    }
+
+    setPendingStopBlenderId(null);
+    setStopBlenderError(null);
+  }
+
+  async function confirmStopRunningBlender() {
+    if (!pendingStopBlenderId) {
+      return;
+    }
+
+    setStoppingBlenderId(pendingStopBlenderId);
+    setStopBlenderError(null);
+
+    try {
+      await stopRunningBlender(pendingStopBlenderId);
+      setPendingStopBlenderId(null);
+    } catch (error) {
+      setStopBlenderError(readErrorMessage(error, "Could not stop Blender."));
+    } finally {
+      setStoppingBlenderId(null);
+    }
+  }
+
   function openUninstallDialog(download: BlenderReleaseDownload) {
     setPendingUninstallDownload(download);
     setRemoveVersionError(null);
@@ -794,6 +1103,41 @@ export default function App() {
     setIsAppUpdateToastOpen(false);
   }
 
+  useEffect(() => {
+    if (blenderSessions.length > 0) {
+      return;
+    }
+
+    setIsRunningBlenderTrayOpen(false);
+    setPendingStopBlenderId(null);
+    setStopBlenderError(null);
+  }, [blenderSessions.length]);
+
+  useEffect(() => {
+    if (!activeLogsProcessId) {
+      return;
+    }
+
+    if (blenderSessions.some((session) => session.instanceId === activeLogsProcessId)) {
+      return;
+    }
+
+    setActiveLogsProcessId(null);
+  }, [activeLogsProcessId, blenderSessions]);
+
+  useEffect(() => {
+    if (!pendingStopBlenderId) {
+      return;
+    }
+
+    if (runningBlenders.some((process) => process.instanceId === pendingStopBlenderId)) {
+      return;
+    }
+
+    setPendingStopBlenderId(null);
+    setStopBlenderError(null);
+  }, [pendingStopBlenderId, runningBlenders]);
+
   const installedReleaseVersions = new Map<string, BlenderVersion>();
 
   for (const version of launcherState?.versions ?? []) {
@@ -808,6 +1152,8 @@ export default function App() {
   const favoriteInstalledVersions = favoriteReleaseVersions
     .map((versionNumber) => installedReleaseVersions.get(versionNumber))
     .filter((version): version is BlenderVersion => Boolean(version));
+  const activeLogsProcess = blenderSessions.find((session) => session.instanceId === activeLogsProcessId) ?? null;
+  const pendingStopBlender = runningBlenders.find((process) => process.instanceId === pendingStopBlenderId) ?? null;
 
   async function confirmUninstall() {
     if (!pendingUninstallDownload) {
@@ -900,18 +1246,29 @@ export default function App() {
         title={activeMeta.title}
         description={activeMeta.description}
         footer={
-          <AppFooter
-            appVersion={footerVersionLabel}
-            updateSummary={appUpdateSummary}
-            updateTone={appUpdateTone}
-            updateVersion={footerUpdateVersion}
-            detailsLabel={appUpdateDetailsLabel}
-            updateActionLabel={appUpdateActionLabel}
-            isCheckingForUpdates={isCheckingForAppUpdates}
-            isUpdating={isUpdatingApp}
-            onInstallUpdate={canInstallAppUpdate ? () => void installAvailableAppUpdate() : null}
-            onShowUpdateDetails={appUpdateInfo ? openAppUpdateToast : null}
-          />
+          <>
+            {blenderSessions.length > 0 ? (
+              <RunningBlenderTray
+                processes={blenderSessions}
+                isOpen={isRunningBlenderTrayOpen}
+                onToggle={() => setIsRunningBlenderTrayOpen((current) => !current)}
+                onOpenLogs={(process) => void openRunningBlenderLogs(process)}
+                onStop={openStopBlenderDialog}
+              />
+            ) : null}
+            <AppFooter
+              appVersion={footerVersionLabel}
+              updateSummary={appUpdateSummary}
+              updateTone={appUpdateTone}
+              updateVersion={footerUpdateVersion}
+              detailsLabel={appUpdateDetailsLabel}
+              updateActionLabel={appUpdateActionLabel}
+              isCheckingForUpdates={isCheckingForAppUpdates}
+              isUpdating={isUpdatingApp}
+              onInstallUpdate={canInstallAppUpdate ? () => void installAvailableAppUpdate() : null}
+              onShowUpdateDetails={appUpdateInfo ? openAppUpdateToast : null}
+            />
+          </>
         }
       >
         {activePage === "home" ? (
@@ -958,6 +1315,13 @@ export default function App() {
         />
       ) : null}
 
+      <BlenderLogsDialog
+        open={activeLogsProcess !== null}
+        process={activeLogsProcess}
+        logs={activeLogsProcess?.logs ?? []}
+        onClose={closeRunningBlenderLogs}
+      />
+
       <ReleaseConfigDialog
         open={activeConfigVersion !== null && activeConfigDialogMode !== null}
         mode={activeConfigDialogMode ?? "save"}
@@ -989,8 +1353,31 @@ export default function App() {
         confirmLabel="Remove config"
         cancelLabel="Keep it"
         isConfirming={isRemovingBlenderConfig}
+        confirmingLabel="Removing..."
         onConfirm={confirmRemoveBlenderConfig}
         onCancel={closeRemoveBlenderConfigDialog}
+      />
+
+      <ConfirmDialog
+        open={pendingStopBlender !== null}
+        title={pendingStopBlender ? `Stop ${pendingStopBlender.blenderVersion ? `Blender ${pendingStopBlender.blenderVersion}` : pendingStopBlender.blenderDisplayName}?` : "Stop Blender?"}
+        description={
+          pendingStopBlender ? (
+            <>
+              <p>This will terminate the running Blender session immediately.</p>
+              <p>Unsaved work in that Blender window may be lost.</p>
+            </>
+          ) : (
+            "This will stop the selected Blender session."
+          )
+        }
+        errorMessage={stopBlenderError}
+        confirmLabel="Stop Blender"
+        confirmingLabel="Stopping..."
+        cancelLabel="Keep it running"
+        isConfirming={stoppingBlenderId !== null}
+        onConfirm={confirmStopRunningBlender}
+        onCancel={closeStopBlenderDialog}
       />
 
       <ConfirmDialog
@@ -1010,12 +1397,14 @@ export default function App() {
         confirmLabel="Remove version"
         cancelLabel="Keep it"
         isConfirming={isRemovingVersion}
+        confirmingLabel="Removing..."
         onConfirm={confirmUninstall}
         onCancel={closeUninstallDialog}
       />
     </>
   );
 }
+
 
 
 

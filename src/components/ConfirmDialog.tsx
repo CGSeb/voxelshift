@@ -8,6 +8,7 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   isConfirming?: boolean;
+  confirmingLabel?: string;
   onConfirm: () => void | Promise<void>;
   onCancel: () => void;
 }
@@ -20,6 +21,7 @@ export function ConfirmDialog({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   isConfirming = false,
+  confirmingLabel = "Removing...",
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -67,10 +69,11 @@ export function ConfirmDialog({
             {cancelLabel}
           </button>
           <button className="card-action card-action-danger" type="button" onClick={() => void onConfirm()} disabled={isConfirming}>
-            {isConfirming ? "Removing..." : confirmLabel}
+            {isConfirming ? confirmingLabel : confirmLabel}
           </button>
         </div>
       </section>
     </div>
   );
 }
+

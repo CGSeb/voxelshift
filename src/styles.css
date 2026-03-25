@@ -730,6 +730,7 @@ p {
 
 .release-launch-button:focus-visible,
 .release-config-button:focus-visible,
+.running-blender-action-button:focus-visible,
 .favorite-button:focus-visible,
 .page-tab:focus-visible,
 .card-action:focus-visible,
@@ -819,12 +820,14 @@ p {
 
 .tooltip {
   position: relative;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
 }
 
 .tooltip-bubble {
   position: absolute;
+  z-index: 60;
   left: 50%;
   bottom: calc(100% + 10px);
   transform: translateX(-50%) translateY(4px);
@@ -1847,3 +1850,313 @@ p {
   justify-content: flex-end;
 }
 
+.running-blender-tray {
+  display: grid;
+  justify-items: stretch;
+  gap: 10px;
+  padding: 0 max(var(--app-shell-gutter), calc((100vw - 1320px) / 2)) 10px;
+}
+
+.running-blender-tray-open {
+  width: 100%;
+  padding-top: 10px;
+  background: #0f1010;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.running-blender-tray-header {
+  border: 1px solid var(--border-soft);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 45%),
+    rgba(15, 16, 16, 0.88);
+  box-shadow: var(--shadow-lg);
+}
+
+.running-blender-tray-header {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 46px;
+  padding: 8px 8px 8px 14px;
+  border-radius: 999px;
+  background: #171919;
+}
+
+.running-blender-tray-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.running-blender-tray-copy strong,
+.blender-logs-dialog-copy h2 {
+  color: var(--text-strong);
+}
+
+.running-blender-tray-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.45);
+}
+
+.running-blender-tray-dot-idle {
+  background: rgba(255, 255, 255, 0.44);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.14);
+}
+
+.running-blender-tray-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.running-blender-tray-toggle:hover,
+.running-blender-tray-toggle:focus-visible {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.running-blender-tray-list {
+  width: 100%;
+  max-width: 100%;
+  overflow: visible;
+  scrollbar-width: thin;
+}
+
+.running-blender-release-list {
+  --running-blender-columns: minmax(0, 2.3fr) minmax(0, 1.45fr) minmax(84px, 0.8fr) minmax(72px, 0.65fr) minmax(90px, 0.85fr) 88px;
+  width: 100%;
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.running-blender-release-row {
+  grid-template-columns: var(--running-blender-columns);
+  column-gap: 16px;
+}
+
+.running-blender-release-row > * {
+  min-width: 0;
+  width: 100%;
+  justify-self: stretch;
+  text-align: left;
+}
+
+.running-blender-release-row > *:last-child {
+  width: auto;
+  justify-self: end;
+}
+
+.running-blender-row-session,
+.blender-logs-dialog-copy {
+  min-width: 0;
+}
+
+.running-blender-row-value,
+.running-blender-row-status,
+.blender-logs-dialog-description,
+.blender-logs-empty-state,
+.blender-log-time,
+.blender-log-source {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.running-blender-row-value,
+.running-blender-row-status {
+  min-width: 0;
+  font-size: 0.88rem;
+}
+
+.running-blender-row-status {
+  display: inline-flex;
+  align-items: center;
+}
+
+.running-blender-row-actions,
+.blender-logs-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.running-blender-row-actions {
+  min-width: 88px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.running-blender-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(122, 170, 196, 0.16);
+  color: #cfe6f3;
+  box-shadow: inset 0 0 0 1px rgba(147, 191, 212, 0.24);
+}
+
+.running-blender-action-button:hover,
+.running-blender-action-button:focus-visible {
+  background: rgba(122, 170, 196, 0.24);
+  color: #eff9ff;
+}
+
+.running-blender-action-button-danger {
+  background: rgba(255, 110, 110, 0.16);
+  color: #ffd7d7;
+  box-shadow: inset 0 0 0 1px rgba(255, 110, 110, 0.28);
+}
+
+.running-blender-action-button-danger:hover,
+.running-blender-action-button-danger:focus-visible {
+  background: rgba(255, 110, 110, 0.24);
+  color: #fff0f0;
+}
+
+.blender-logs-dialog {
+  width: min(960px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  max-height: min(760px, calc(100dvh - 48px));
+  display: grid;
+  gap: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(147, 191, 212, 0.18);
+  border-radius: 24px;
+  padding: 24px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 45%),
+    linear-gradient(180deg, rgba(122, 170, 196, 0.08), transparent 120%),
+    #141414;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.42);
+}
+
+.blender-logs-stream {
+  display: grid;
+  gap: 8px;
+  min-height: 240px;
+  max-height: min(58vh, 520px);
+  overflow-y: auto;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.34);
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  scrollbar-width: thin;
+}
+
+.blender-log-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.blender-log-time,
+.blender-log-source {
+  white-space: nowrap;
+}
+
+.blender-log-source {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+}
+
+.blender-log-line-stderr .blender-log-message {
+  color: #ffbcbc;
+}
+
+.blender-log-line-system .blender-log-message {
+  color: #b9ffd7;
+}
+
+.blender-log-message {
+  color: #f2ede6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .blender-logs-dialog-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .running-blender-tray {
+    justify-items: stretch;
+  }
+
+  .running-blender-tray-header {
+    width: 100%;
+  }
+
+  .running-blender-release-list {
+    min-width: 0;
+  }
+
+  .running-blender-release-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .running-blender-release-list .release-list-header {
+    display: none;
+  }
+
+  .running-blender-row-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .running-blender-tray {
+    padding-right: var(--app-shell-gutter);
+    padding-left: var(--app-shell-gutter);
+  }
+
+  .running-blender-tray-header {
+    padding: 8px 8px 8px 12px;
+  }
+
+  .running-blender-release-list {
+    min-width: 0;
+  }
+
+  .blender-logs-dialog {
+    padding: 18px;
+  }
+
+  .running-blender-row-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .blender-log-line {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
