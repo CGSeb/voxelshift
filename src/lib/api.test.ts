@@ -14,6 +14,8 @@ import {
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
+  getRunningBlenderLogs,
+  getRunningBlenders,
   installBlenderRelease,
   launchBlender,
   launchBlenderProject,
@@ -25,6 +27,7 @@ import {
   saveBlenderConfig,
   scanForBlenderVersions,
   setDefaultBlenderVersion,
+  stopRunningBlender,
 } from "./api";
 
 describe("api wrappers", () => {
@@ -55,6 +58,9 @@ describe("api wrappers", () => {
     await removeScanRoot("D:\\Blender");
     await launchBlender(launchPayload);
     await launchBlenderProject(projectPayload);
+    await getRunningBlenders();
+    await getRunningBlenderLogs("instance-1");
+    await stopRunningBlender("instance-1");
     await openVersionLocation("version-1");
     await getBlenderReleaseDownloads();
     await installBlenderRelease(installPayload);
@@ -75,6 +81,9 @@ describe("api wrappers", () => {
       ["remove_scan_root", { path: "D:\\Blender" }],
       ["launch_blender", { request: launchPayload }],
       ["launch_blender_project", { request: projectPayload }],
+      ["get_running_blenders"],
+      ["get_running_blender_logs", { instanceId: "instance-1" }],
+      ["stop_running_blender", { instanceId: "instance-1" }],
       ["open_version_location", { id: "version-1" }],
       ["get_blender_release_downloads"],
       ["install_blender_release", { request: installPayload }],

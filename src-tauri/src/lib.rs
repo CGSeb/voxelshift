@@ -2,15 +2,16 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 #[cfg(target_os = "linux")]
 use std::io::Read;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     path::BaseDirectory, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position,
@@ -30,6 +31,8 @@ const BLENDER_RELEASE_INDEX_URL: &str = "https://download.blender.org/release/";
 const BLENDER_DAILY_BUILDS_URL: &str = "https://builder.blender.org/download/daily/";
 const BLENDER_BUILDER_CDN_URL: &str = "https://cdn.builder.blender.org/";
 const RELEASE_INSTALL_EVENT: &str = "release-install-progress";
+const RUNNING_BLENDERS_EVENT: &str = "running-blenders-updated";
+const RUNNING_BLENDER_LOG_EVENT: &str = "running-blender-log";
 const VOXELSHIFT_DIR_NAME: &str = "VoxelShift";
 const STABLE_INSTALL_DIR_NAME: &str = "stable";
 const CONFIGS_DIR_NAME: &str = "configs";
@@ -44,6 +47,8 @@ const BLENDER_EXTENSION_ENABLE_SCRIPT: &str =
 const DOWNLOAD_PROGRESS_WEIGHT: f64 = 95.0;
 const INSTALL_CANCELED_MESSAGE: &str = "Installation canceled.";
 const MAX_SCAN_DEPTH: usize = 5;
+const MAX_RUNNING_BLENDER_LOG_LINES: usize = 2_000;
+const BLENDER_PROCESS_POLL_INTERVAL_MS: u64 = 500;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -246,6 +251,166 @@ struct ApplyBlenderConfigRequest {
     config_id: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunningBlenderProcess {
+    instance_id: String,
+    blender_id: String,
+    blender_display_name: String,
+    blender_version: Option<String>,
+    pid: u32,
+    started_at: u64,
+    project_path: Option<String>,
+    is_stopping: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlenderLogEntry {
+    id: String,
+    instance_id: String,
+    source: String,
+    message: String,
+    timestamp: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlenderLogEventPayload {
+    instance_id: String,
+    entry: BlenderLogEntry,
+}
+
+struct ManagedBlenderProcess {
+    info: RunningBlenderProcess,
+    child: Arc<Mutex<Child>>,
+    logs: VecDeque<BlenderLogEntry>,
+    next_log_index: u64,
+}
+
+#[derive(Clone, Default)]
+struct RunningBlenderRegistry {
+    processes: Arc<Mutex<BTreeMap<String, Arc<Mutex<ManagedBlenderProcess>>>>>,
+}
+
+impl RunningBlenderRegistry {
+    fn insert(&self, process: ManagedBlenderProcess) -> Result<(), String> {
+        let instance_id = process.info.instance_id.clone();
+        self.processes
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?
+            .insert(instance_id, Arc::new(Mutex::new(process)));
+        Ok(())
+    }
+
+    fn get(&self, instance_id: &str) -> Result<Option<Arc<Mutex<ManagedBlenderProcess>>>, String> {
+        Ok(self
+            .processes
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?
+            .get(instance_id)
+            .cloned())
+    }
+
+    fn list(&self) -> Result<Vec<RunningBlenderProcess>, String> {
+        let processes = self
+            .processes
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut infos = Vec::with_capacity(processes.len());
+        for process in processes {
+            infos.push(
+                process
+                    .lock()
+                    .map_err(|_| "Unable to access Blender process state.".to_string())?
+                    .info
+                    .clone(),
+            );
+        }
+
+        infos.sort_by(|left, right| {
+            right
+                .started_at
+                .cmp(&left.started_at)
+                .then_with(|| left.pid.cmp(&right.pid))
+        });
+
+        Ok(infos)
+    }
+
+    fn logs(&self, instance_id: &str) -> Result<Vec<BlenderLogEntry>, String> {
+        let process = self
+            .get(instance_id)?
+            .ok_or_else(|| "That Blender session is no longer running.".to_string())?;
+
+        let process = process
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?;
+        let logs = process.logs.iter().cloned().collect();
+        Ok(logs)
+    }
+
+    fn set_stopping(&self, instance_id: &str, is_stopping: bool) -> Result<bool, String> {
+        let Some(process) = self.get(instance_id)? else {
+            return Ok(false);
+        };
+
+        process
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?
+            .info
+            .is_stopping = is_stopping;
+        Ok(true)
+    }
+
+    fn append_log(
+        &self,
+        instance_id: &str,
+        source: &str,
+        message: &str,
+    ) -> Result<Option<BlenderLogEntry>, String> {
+        let trimmed = message.trim_end_matches(|character| character == '\r' || character == '\n');
+        if trimmed.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let Some(process) = self.get(instance_id)? else {
+            return Ok(None);
+        };
+
+        let mut process = process
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?;
+        let entry = BlenderLogEntry {
+            id: format!("{}-{}", instance_id, process.next_log_index),
+            instance_id: instance_id.to_string(),
+            source: source.to_string(),
+            message: trimmed.to_string(),
+            timestamp: current_timestamp(),
+        };
+        process.next_log_index += 1;
+        process.logs.push_back(entry.clone());
+        while process.logs.len() > MAX_RUNNING_BLENDER_LOG_LINES {
+            process.logs.pop_front();
+        }
+
+        Ok(Some(entry))
+    }
+
+    fn remove(&self, instance_id: &str) -> Result<bool, String> {
+        Ok(self
+            .processes
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?
+            .remove(instance_id)
+            .is_some())
+    }
+}
+
 #[derive(Clone, Default)]
 struct ReleaseInstallControl {
     active_ids: Arc<Mutex<HashSet<String>>>,
@@ -310,6 +475,7 @@ impl ReleaseInstallControl {
 pub fn run() {
     tauri::Builder::default()
         .manage(ReleaseInstallControl::default())
+        .manage(RunningBlenderRegistry::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -330,10 +496,7 @@ pub fn run() {
             }
 
             match event {
-                WindowEvent::Moved(_)
-                | WindowEvent::Resized(_)
-                | WindowEvent::CloseRequested { .. }
-                | WindowEvent::Destroyed => {
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
                     if let Err(error) = save_window_state_for(window) {
                         eprintln!("Unable to save window state: {error}");
                     }
@@ -356,6 +519,9 @@ pub fn run() {
             remove_scan_root,
             launch_blender,
             launch_blender_project,
+            get_running_blenders,
+            get_running_blender_logs,
+            stop_running_blender,
             open_version_location,
             get_blender_release_downloads,
             install_blender_release,
@@ -374,6 +540,63 @@ fn get_launcher_state(app: AppHandle) -> Result<LauncherState, String> {
 fn get_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
     let state = build_launcher_state(&app)?;
     Ok(collect_recent_projects(&state.versions))
+}
+
+#[tauri::command]
+fn get_running_blenders(
+    running_blenders: tauri::State<'_, RunningBlenderRegistry>,
+) -> Result<Vec<RunningBlenderProcess>, String> {
+    running_blenders.list()
+}
+
+#[tauri::command]
+fn get_running_blender_logs(
+    running_blenders: tauri::State<'_, RunningBlenderRegistry>,
+    instance_id: String,
+) -> Result<Vec<BlenderLogEntry>, String> {
+    running_blenders.logs(&instance_id)
+}
+
+#[tauri::command]
+fn stop_running_blender(
+    app: AppHandle,
+    running_blenders: tauri::State<'_, RunningBlenderRegistry>,
+    instance_id: String,
+) -> Result<(), String> {
+    let process = running_blenders
+        .get(&instance_id)?
+        .ok_or_else(|| "That Blender session is no longer running.".to_string())?;
+
+    running_blenders.set_stopping(&instance_id, true)?;
+    emit_running_blenders_changed(&app, running_blenders.inner());
+
+    let child = process
+        .lock()
+        .map_err(|_| "Unable to access Blender process state.".to_string())?
+        .child
+        .clone();
+
+    let kill_result = {
+        let mut child = child
+            .lock()
+            .map_err(|_| "Unable to access Blender process state.".to_string())?;
+        child.kill()
+    };
+
+    match kill_result {
+        Ok(_) => Ok(()),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::InvalidInput
+                || error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(())
+        }
+        Err(error) => {
+            let _ = running_blenders.set_stopping(&instance_id, false);
+            emit_running_blenders_changed(&app, running_blenders.inner());
+            Err(format!("Failed to stop Blender: {error}"))
+        }
+    }
 }
 
 #[tauri::command]
@@ -719,7 +942,11 @@ fn remove_scan_root(app: AppHandle, path: String) -> Result<LauncherState, Strin
 }
 
 #[tauri::command]
-fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherState, String> {
+fn launch_blender(
+    app: AppHandle,
+    running_blenders: tauri::State<'_, RunningBlenderRegistry>,
+    request: LaunchRequest,
+) -> Result<LauncherState, String> {
     let mut stored = load_stored_state(&app)?;
     let state = build_launcher_state(&app)?;
     let version = resolve_launch_version(&state.versions, &request.id)?;
@@ -730,10 +957,7 @@ fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherStat
         .map(split_command_line)
         .unwrap_or_default();
 
-    Command::new(&version.executable_path)
-        .args(args)
-        .spawn()
-        .map_err(|error| format!("Failed to launch Blender: {error}"))?;
+    launch_managed_blender_process(&app, running_blenders.inner().clone(), version, args, None)?;
 
     remember_launched_version(&mut stored, version);
     save_stored_state(&app, &stored)?;
@@ -743,21 +967,195 @@ fn launch_blender(app: AppHandle, request: LaunchRequest) -> Result<LauncherStat
 #[tauri::command]
 fn launch_blender_project(
     app: AppHandle,
+    running_blenders: tauri::State<'_, RunningBlenderRegistry>,
     request: LaunchProjectRequest,
 ) -> Result<LauncherState, String> {
     let mut stored = load_stored_state(&app)?;
     let state = build_launcher_state(&app)?;
     let version = resolve_launch_version(&state.versions, &request.id)?;
     let project_path = validate_project_launch_path(&request.project_path)?;
+    let project_path_string = path_to_string(&project_path);
 
-    Command::new(&version.executable_path)
-        .arg(&project_path)
-        .spawn()
-        .map_err(|error| format!("Failed to launch Blender: {error}"))?;
+    launch_managed_blender_process(
+        &app,
+        running_blenders.inner().clone(),
+        version,
+        vec![project_path_string.clone()],
+        Some(project_path_string),
+    )?;
 
     remember_launched_version(&mut stored, version);
     save_stored_state(&app, &stored)?;
     build_launcher_state(&app)
+}
+
+fn launch_managed_blender_process(
+    app: &AppHandle,
+    running_blenders: RunningBlenderRegistry,
+    version: &BlenderVersion,
+    args: Vec<String>,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    let mut command = Command::new(&version.executable_path);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to launch Blender: {error}"))?;
+    let pid = child.id();
+    let started_at = current_timestamp();
+    let instance_id = make_running_blender_instance_id(&version.id, pid, started_at);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let child = Arc::new(Mutex::new(child));
+
+    running_blenders.insert(ManagedBlenderProcess {
+        info: RunningBlenderProcess {
+            instance_id: instance_id.clone(),
+            blender_id: version.id.clone(),
+            blender_display_name: version.display_name.clone(),
+            blender_version: version.version.clone(),
+            pid,
+            started_at,
+            project_path,
+            is_stopping: false,
+        },
+        child: child.clone(),
+        logs: VecDeque::new(),
+        next_log_index: 0,
+    })?;
+
+    emit_running_blenders_changed(app, &running_blenders);
+    spawn_blender_log_reader(app.clone(), running_blenders.clone(), instance_id.clone(), "stdout", stdout);
+    spawn_blender_log_reader(app.clone(), running_blenders.clone(), instance_id.clone(), "stderr", stderr);
+    spawn_blender_process_monitor(app.clone(), running_blenders, instance_id, child);
+    Ok(())
+}
+
+fn spawn_blender_log_reader<R>(
+    app: AppHandle,
+    running_blenders: RunningBlenderRegistry,
+    instance_id: String,
+    source: &'static str,
+    stream: Option<R>,
+) where
+    R: std::io::Read + Send + 'static,
+{
+    let Some(stream) = stream else {
+        return;
+    };
+
+    thread::spawn(move || {
+        let reader = BufReader::new(stream);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if let Err(error) = append_blender_log_and_emit(
+                        &app,
+                        &running_blenders,
+                        &instance_id,
+                        source,
+                        &line,
+                    ) {
+                        eprintln!("Unable to track Blender logs: {error}");
+                        break;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Unable to read Blender logs: {error}");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_blender_process_monitor(
+    app: AppHandle,
+    running_blenders: RunningBlenderRegistry,
+    instance_id: String,
+    child: Arc<Mutex<Child>>,
+) {
+    thread::spawn(move || loop {
+        let status = {
+            let mut child = match child.lock() {
+                Ok(child) => child,
+                Err(_) => break,
+            };
+
+            match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = append_blender_log_and_emit(
+                        &app,
+                        &running_blenders,
+                        &instance_id,
+                        "system",
+                        &format!("Unable to monitor Blender: {error}"),
+                    );
+                    let _ = running_blenders.remove(&instance_id);
+                    emit_running_blenders_changed(&app, &running_blenders);
+                    break;
+                }
+            }
+        };
+
+        if let Some(status) = status {
+            let exit_message = match status.code() {
+                Some(code) => format!("Blender exited with code {code}."),
+                None => "Blender exited.".to_string(),
+            };
+            let _ = append_blender_log_and_emit(
+                &app,
+                &running_blenders,
+                &instance_id,
+                "system",
+                &exit_message,
+            );
+            let _ = running_blenders.remove(&instance_id);
+            emit_running_blenders_changed(&app, &running_blenders);
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(BLENDER_PROCESS_POLL_INTERVAL_MS));
+    });
+}
+
+fn append_blender_log_and_emit(
+    app: &AppHandle,
+    running_blenders: &RunningBlenderRegistry,
+    instance_id: &str,
+    source: &str,
+    message: &str,
+) -> Result<(), String> {
+    if let Some(entry) = running_blenders.append_log(instance_id, source, message)? {
+        let _ = app.emit(
+            RUNNING_BLENDER_LOG_EVENT,
+            BlenderLogEventPayload {
+                instance_id: instance_id.to_string(),
+                entry,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn emit_running_blenders_changed(app: &AppHandle, running_blenders: &RunningBlenderRegistry) {
+    if let Ok(processes) = running_blenders.list() {
+        let _ = app.emit(RUNNING_BLENDERS_EVENT, processes);
+    }
+}
+
+fn make_running_blender_instance_id(blender_id: &str, pid: u32, started_at: u64) -> String {
+    format!("{}-{}-{}", blender_id, pid, started_at)
 }
 
 fn remember_launched_version(stored: &mut StoredState, version: &BlenderVersion) {
@@ -1850,8 +2248,17 @@ fn validate_install_request(request: &InstallReleaseRequest) -> Result<(), Strin
     Ok(())
 }
 
-async fn download_release_archive(
-    app: &AppHandle,
+trait ReleaseInstallProgressEmitter: Clone + Send + Sync + 'static {
+    fn emit_release_install_progress(&self, progress: ReleaseInstallProgress);
+}
+
+impl<R: tauri::Runtime> ReleaseInstallProgressEmitter for AppHandle<R> {
+    fn emit_release_install_progress(&self, progress: ReleaseInstallProgress) {
+        let _ = self.emit(RELEASE_INSTALL_EVENT, progress);
+    }
+}
+async fn download_release_archive<E: ReleaseInstallProgressEmitter>(
+    app: &E,
     control: &ReleaseInstallControl,
     request: &InstallReleaseRequest,
     archive_path: &Path,
@@ -1956,8 +2363,8 @@ async fn download_release_archive(
     Ok(())
 }
 
-async fn extract_release_archive(
-    app: &AppHandle,
+async fn extract_release_archive<E: ReleaseInstallProgressEmitter>(
+    app: &E,
     control: ReleaseInstallControl,
     request: &InstallReleaseRequest,
     archive_path: &Path,
@@ -2008,8 +2415,8 @@ async fn extract_release_archive(
     .map_err(|error| format!("Failed to finish the Blender install: {error}"))?
 }
 
-fn extract_zip_release_archive(
-    app: &AppHandle,
+fn extract_zip_release_archive<E: ReleaseInstallProgressEmitter>(
+    app: &E,
     control: &ReleaseInstallControl,
     request: &InstallReleaseRequest,
     archive_path: &Path,
@@ -2071,8 +2478,8 @@ fn extract_zip_release_archive(
     Ok(())
 }
 
-fn extract_tar_xz_release_archive(
-    app: &AppHandle,
+fn extract_tar_xz_release_archive<E: ReleaseInstallProgressEmitter>(
+    app: &E,
     control: &ReleaseInstallControl,
     request: &InstallReleaseRequest,
     archive_path: &Path,
@@ -2217,12 +2624,15 @@ fn finalize_extracted_release(
     Ok(final_install_dir)
 }
 
-fn emit_release_install_progress(app: &AppHandle, progress: ReleaseInstallProgress) {
-    let _ = app.emit(RELEASE_INSTALL_EVENT, progress);
+fn emit_release_install_progress<E: ReleaseInstallProgressEmitter>(
+    app: &E,
+    progress: ReleaseInstallProgress,
+) {
+    app.emit_release_install_progress(progress);
 }
 
-fn install_voxel_shift_extension(
-    app: &AppHandle,
+fn install_voxel_shift_extension<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     blender_install_dir: &Path,
 ) -> Result<(), String> {
     let extension_dir = blender_install_dir.join(BLENDER_EXTENSION_DIR);
@@ -2291,7 +2701,7 @@ fn enable_voxel_shift_extension(blender_install_dir: &Path) -> Result<(), String
     ))
 }
 
-fn resolve_extension_resource_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+fn resolve_extension_resource_path<R: tauri::Runtime>(app: &AppHandle<R>, file_name: &str) -> Result<PathBuf, String> {
     let bundled_path = app
         .path()
         .resolve(file_name, BaseDirectory::Resource)
@@ -4014,4 +4424,437 @@ mod tests {
             Err(message) if message.contains("The config source directory is missing")
         ));
     }
+
+    fn spawn_finished_child() -> Child {
+        #[cfg(target_os = "windows")]
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("test child process should spawn");
+
+        #[cfg(not(target_os = "windows"))]
+        let mut child = Command::new("sh")
+            .args(["-c", "true"])
+            .spawn()
+            .expect("test child process should spawn");
+
+        child
+            .wait()
+            .expect("test child process should exit cleanly");
+        child
+    }
+
+    fn make_running_process(
+        instance_id: &str,
+        pid: u32,
+        started_at: u64,
+        is_stopping: bool,
+    ) -> ManagedBlenderProcess {
+        ManagedBlenderProcess {
+            info: RunningBlenderProcess {
+                instance_id: instance_id.to_string(),
+                blender_id: format!("blender-{instance_id}"),
+                blender_display_name: format!("Blender {instance_id}"),
+                blender_version: Some("4.2.3".to_string()),
+                pid,
+                started_at,
+                project_path: Some(format!("D:/Projects/{instance_id}.blend")),
+                is_stopping,
+            },
+            child: Arc::new(Mutex::new(spawn_finished_child())),
+            logs: VecDeque::new(),
+            next_log_index: 0,
+        }
+    }
+
+    #[test]
+    fn running_blender_registry_tracks_process_lifecycle_and_sorting() {
+        let registry = RunningBlenderRegistry::default();
+        registry
+            .insert(make_running_process("older", 300, 10, false))
+            .unwrap();
+        registry
+            .insert(make_running_process("newer", 200, 30, false))
+            .unwrap();
+        registry
+            .insert(make_running_process("same-time", 100, 30, false))
+            .unwrap();
+
+        let stored = registry
+            .get("older")
+            .unwrap()
+            .expect("process should be stored");
+        assert_eq!(stored.lock().unwrap().info.blender_id, "blender-older");
+        assert!(registry.get("missing").unwrap().is_none());
+
+        let listed = registry.list().unwrap();
+        let instance_ids = listed
+            .iter()
+            .map(|process| process.instance_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(instance_ids, vec!["same-time", "newer", "older"]);
+
+        assert_eq!(registry.set_stopping("older", true).unwrap(), true);
+        assert!(registry
+            .get("older")
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .info
+            .is_stopping);
+        assert_eq!(registry.set_stopping("missing", true).unwrap(), false);
+
+        assert_eq!(registry.remove("older").unwrap(), true);
+        assert!(registry.get("older").unwrap().is_none());
+        assert_eq!(registry.remove("older").unwrap(), false);
+    }
+
+    #[test]
+    fn running_blender_registry_logs_trim_messages_and_handle_missing_processes() {
+        let registry = RunningBlenderRegistry::default();
+        registry
+            .insert(make_running_process("session-1", 101, 42, false))
+            .unwrap();
+
+        assert!(registry
+            .append_log("session-1", "stdout", " \r\n")
+            .unwrap()
+            .is_none());
+        assert!(registry
+            .append_log("missing", "stdout", "hello")
+            .unwrap()
+            .is_none());
+
+        let first = registry
+            .append_log("session-1", "stdout", "hello world\r\n")
+            .unwrap()
+            .expect("non-empty log should be appended");
+        assert_eq!(first.id, "session-1-0");
+        assert_eq!(first.message, "hello world");
+
+        let second = registry
+            .append_log("session-1", "stderr", "second line\n")
+            .unwrap()
+            .expect("second log should be appended");
+        assert_eq!(second.id, "session-1-1");
+
+        let logs = registry.logs("session-1").unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].source, "stdout");
+        assert_eq!(logs[1].source, "stderr");
+        assert!(matches!(
+            registry.logs("missing"),
+            Err(message) if message == "That Blender session is no longer running."
+        ));
+    }
+
+    #[test]
+    fn running_blender_registry_discards_oldest_logs_after_limit() {
+        let registry = RunningBlenderRegistry::default();
+        registry
+            .insert(make_running_process("buffered", 202, 77, false))
+            .unwrap();
+
+        for index in 0..(MAX_RUNNING_BLENDER_LOG_LINES + 2) {
+            registry
+                .append_log("buffered", "stdout", &format!("line {index}\n"))
+                .unwrap();
+        }
+
+        let logs = registry.logs("buffered").unwrap();
+        assert_eq!(logs.len(), MAX_RUNNING_BLENDER_LOG_LINES);
+        assert_eq!(logs.first().unwrap().message, "line 2");
+        assert_eq!(logs.first().unwrap().id, "buffered-2");
+        assert_eq!(
+            logs.last().unwrap().message,
+            format!("line {}", MAX_RUNNING_BLENDER_LOG_LINES + 1)
+        );
+    }
+
+    #[test]
+    fn copy_directory_contents_copies_nested_files_and_overwrites_existing_targets() {
+        let sandbox = TestDir::new("copy-directory-contents");
+        let source_dir = sandbox.path().join("source");
+        let target_dir = sandbox.path().join("target");
+
+        fs::create_dir_all(source_dir.join("scripts").join("startup")).unwrap();
+        fs::write(source_dir.join("userpref.blend"), b"fresh-userpref").unwrap();
+        fs::write(
+            source_dir.join("scripts").join("startup").join("theme.py"),
+            b"fresh-theme",
+        )
+        .unwrap();
+
+        fs::create_dir_all(target_dir.join("scripts")).unwrap();
+        fs::write(target_dir.join("userpref.blend"), b"stale-userpref").unwrap();
+        fs::write(target_dir.join("scripts").join("keep.py"), b"keep").unwrap();
+
+        copy_directory_contents(&source_dir, &target_dir).unwrap();
+
+        assert_eq!(
+            fs::read(target_dir.join("userpref.blend")).unwrap(),
+            b"fresh-userpref"
+        );
+        assert_eq!(
+            fs::read(target_dir.join("scripts").join("startup").join("theme.py")).unwrap(),
+            b"fresh-theme"
+        );
+        assert_eq!(
+            fs::read(target_dir.join("scripts").join("keep.py")).unwrap(),
+            b"keep"
+        );
+        assert!(matches!(
+            copy_directory_contents(&source_dir.join("userpref.blend"), &target_dir),
+            Err(message) if message.contains("The config source directory is missing")
+        ));
+    }
+
+    fn start_test_http_server(
+        status_line: &str,
+        body: &[u8],
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("test HTTP server should bind to a local port");
+        let address = listener
+            .local_addr()
+            .expect("test HTTP server should expose its address");
+        let status_line = status_line.to_string();
+        let body = body.to_vec();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("test HTTP server should accept a request");
+            let mut request = [0_u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+
+            let headers = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .expect("test HTTP server should write response headers");
+            stream
+                .write_all(&body)
+                .expect("test HTTP server should write response body");
+        });
+
+        (format!("http://{address}/download"), handle)
+    }
+
+    fn make_install_request(id: &str, file_name: &str, url: &str) -> InstallReleaseRequest {
+        InstallReleaseRequest {
+            id: id.to_string(),
+            version: "4.2.3".to_string(),
+            file_name: file_name.to_string(),
+            url: url.to_string(),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestProgressEmitter;
+
+    impl ReleaseInstallProgressEmitter for TestProgressEmitter {
+        fn emit_release_install_progress(&self, _progress: ReleaseInstallProgress) {}
+    }
+    fn write_zip_archive(entries: &[(String, Option<&[u8]>)], archive_path: &Path) {
+        let archive_file = fs::File::create(archive_path).expect("zip archive should be created");
+        let mut archive = zip::ZipWriter::new(archive_file);
+        let options = zip::write::FileOptions::default();
+
+        for (path, contents) in entries {
+            match contents {
+                Some(contents) => {
+                    archive
+                        .start_file(path.clone(), options)
+                        .expect("zip archive should include a file entry");
+                    archive
+                        .write_all(contents)
+                        .expect("zip archive file entry should be written");
+                }
+                None => {
+                    archive
+                        .add_directory(path.clone(), options)
+                        .expect("zip archive should include a directory entry");
+                }
+            }
+        }
+
+        archive.finish().expect("zip archive should finalize cleanly");
+    }
+
+    #[test]
+    fn fetch_text_reads_success_bodies_and_reports_http_errors() {
+        let client = reqwest::Client::new();
+        let (ok_url, ok_server) = start_test_http_server("200 OK", b"hello from voxel shift");
+        let ok_body = tauri::async_runtime::block_on(fetch_text(&client, &ok_url))
+            .expect("successful response body should be returned");
+        ok_server.join().unwrap();
+        assert_eq!(ok_body, "hello from voxel shift");
+
+        let (error_url, error_server) = start_test_http_server("500 Internal Server Error", b"");
+        let error = tauri::async_runtime::block_on(fetch_text(&client, &error_url))
+            .expect_err("non-success status should be reported as an error");
+        error_server.join().unwrap();
+        assert!(error.contains("unexpected status: 500 Internal Server Error"));
+    }
+
+    #[test]
+    fn download_release_archive_writes_response_bytes_to_disk() {
+        let app = TestProgressEmitter::default();
+        let request_body = b"downloaded-blender-archive";
+        let (url, server) = start_test_http_server("200 OK", request_body);
+        let request = make_install_request("download-success", "blender-4.2.3-windows-x64.zip", &url);
+        let control = ReleaseInstallControl::default();
+        let sandbox = TestDir::new("download-release-archive");
+        let archive_path = sandbox.path().join("download.zip");
+
+        tauri::async_runtime::block_on(download_release_archive(
+            &app,
+            &control,
+            &request,
+            &archive_path,
+        ))
+        .expect("download helper should write a successful response to disk");
+        server.join().unwrap();
+
+        assert_eq!(fs::read(&archive_path).unwrap(), request_body);
+    }
+
+    #[test]
+    fn extract_release_archive_installs_zip_releases() {
+        let app = TestProgressEmitter::default();
+        let sandbox = TestDir::new("extract-release-archive-success");
+        let archive_path = sandbox.path().join("blender-4.2.3-windows-x64.zip");
+        write_zip_archive(
+            &[
+                ("blender-4.2.3-windows-x64/".to_string(), None),
+                (
+                    format!("blender-4.2.3-windows-x64/{BLENDER_EXECUTABLE_NAME}"),
+                    Some(b"binary"),
+                ),
+                (
+                    "blender-4.2.3-windows-x64/scripts/startup/theme.py".to_string(),
+                    Some(b"theme"),
+                ),
+            ],
+            &archive_path,
+        );
+
+        let control = ReleaseInstallControl::default();
+        let request = make_install_request(
+            "extract-success",
+            "blender-4.2.3-windows-x64.zip",
+            "https://download.blender.org/release/Blender4.2/blender-4.2.3-windows-x64.zip",
+        );
+        let stable_dir = sandbox.path().join("stable");
+        let temp_dir = sandbox.path().join("temp");
+        fs::create_dir_all(&stable_dir).unwrap();
+        fs::create_dir_all(temp_dir.join("extract")).unwrap();
+        fs::write(temp_dir.join("extract").join("stale.txt"), b"stale").unwrap();
+
+        let final_dir = tauri::async_runtime::block_on(extract_release_archive(
+            &app,
+            control,
+            &request,
+            &archive_path,
+            &stable_dir,
+            &temp_dir,
+        ))
+        .expect("zip extraction helper should install the release into the stable directory");
+
+        assert_eq!(final_dir, stable_dir.join("blender-4.2.3-windows-x64"));
+        assert_eq!(fs::read(final_dir.join(BLENDER_EXECUTABLE_NAME)).unwrap(), b"binary");
+        assert_eq!(
+            fs::read(final_dir.join("scripts").join("startup").join("theme.py")).unwrap(),
+            b"theme"
+        );
+        assert!(!temp_dir.join("extract").join("stale.txt").exists());
+    }
+
+    #[test]
+    fn extract_release_archive_rejects_unsupported_archive_types() {
+        let app = TestProgressEmitter::default();
+        let sandbox = TestDir::new("extract-release-archive-unsupported");
+        let archive_path = sandbox.path().join("blender-4.2.3.dmg");
+        fs::write(&archive_path, b"not-a-supported-archive").unwrap();
+
+        let error = tauri::async_runtime::block_on(extract_release_archive(
+            &app,
+            ReleaseInstallControl::default(),
+            &make_install_request(
+                "extract-unsupported",
+                "blender-4.2.3.dmg",
+                "https://download.blender.org/release/Blender4.2/blender-4.2.3.dmg",
+            ),
+            &archive_path,
+            &sandbox.path().join("stable"),
+            &sandbox.path().join("temp"),
+        ))
+        .expect_err("unsupported archive extensions should be rejected");
+
+        assert_eq!(
+            error,
+            "Automatic installs currently support .zip and .tar.xz Blender releases only."
+        );
+    }
+
+    #[test]
+    fn extract_zip_release_archive_rejects_invalid_entry_paths() {
+        let app = TestProgressEmitter::default();
+        let sandbox = TestDir::new("extract-zip-invalid-entry");
+        let archive_path = sandbox.path().join("invalid.zip");
+        write_zip_archive(&[("../evil.txt".to_string(), Some(b"evil"))], &archive_path);
+
+        let error = extract_zip_release_archive(
+            &app,
+            &ReleaseInstallControl::default(),
+            &make_install_request(
+                "zip-invalid-path",
+                "blender-4.2.3-windows-x64.zip",
+                "https://download.blender.org/release/Blender4.2/blender-4.2.3-windows-x64.zip",
+            ),
+            &archive_path,
+            &sandbox.path().join("extract"),
+        )
+        .expect_err("zip entries with parent traversal should be rejected");
+
+        assert!(error.contains("has an invalid path"));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn extract_tar_xz_release_archive_reports_platform_limit() {
+        let app = TestProgressEmitter::default();
+        let sandbox = TestDir::new("extract-tar-xz-platform-limit");
+
+        let error = extract_tar_xz_release_archive(
+            &app,
+            &ReleaseInstallControl::default(),
+            &make_install_request(
+                "tar-platform-limit",
+                "blender-4.2.3-linux-x64.tar.xz",
+                "https://download.blender.org/release/Blender4.2/blender-4.2.3-linux-x64.tar.xz",
+            ),
+            &sandbox.path().join("archive.tar.xz"),
+            &sandbox.path().join("extract"),
+        )
+        .expect_err("non-Linux builds should reject tar.xz extraction");
+
+        assert_eq!(
+            error,
+            "Linux tar.xz release extraction is only supported on Linux builds."
+        );
+    }
+
 }
+
+
+
+
+
+
+
+

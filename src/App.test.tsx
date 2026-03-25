@@ -1,14 +1,16 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
   BlenderConfigProfile,
+  BlenderLogEntry,
   BlenderReleaseDownload,
   BlenderReleaseInstallProgress,
   BlenderReleaseListing,
   BlenderVersion,
   LauncherState,
   RecentProject,
+  RunningBlenderProcess,
 } from "./types";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -23,12 +25,15 @@ const apiMocks = vi.hoisted(() => ({
   getBlenderReleaseDownloads: vi.fn(),
   getLauncherState: vi.fn(),
   getRecentProjects: vi.fn(),
+  getRunningBlenderLogs: vi.fn(),
+  getRunningBlenders: vi.fn(),
   installBlenderRelease: vi.fn(),
   launchBlender: vi.fn(),
   launchBlenderProject: vi.fn(),
   removeBlenderConfig: vi.fn(),
   removeBlenderVersion: vi.fn(),
   saveBlenderConfig: vi.fn(),
+  stopRunningBlender: vi.fn(),
 }));
 
 const updaterMocks = vi.hoisted(() => ({
@@ -112,12 +117,65 @@ const savedConfig: BlenderConfigProfile = {
   updatedAt: 1,
 };
 
+const runningBlender: RunningBlenderProcess = {
+  instanceId: "session-1",
+  blenderId: installedVersion.id,
+  blenderDisplayName: installedVersion.displayName,
+  blenderVersion: installedVersion.version,
+  pid: 4242,
+  startedAt: 1,
+  projectPath: recentProject.filePath,
+  isStopping: false,
+};
+
+const runningBlenderLog: BlenderLogEntry = {
+  id: "session-1-0",
+  instanceId: runningBlender.instanceId,
+  source: "stdout",
+  message: "Loading startup file",
+  timestamp: 1,
+};
+
+const releaseInstallEvent = "release-install-progress";
+const runningBlendersEvent = "running-blenders-updated";
+const runningBlenderLogEvent = "running-blender-log";
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+
+  return { promise, resolve, reject };
+}
+
+function emitTauriEvent<TPayload>(eventName: string, payload: TPayload) {
+  const listener = tauriMocks.listen.mock.calls.find((call) => call[0] === eventName)?.[1] as
+    | ((event: { payload: TPayload }) => void)
+    | undefined;
+  listener?.({ payload });
+}
+
 function emitInstallProgress(progress: BlenderReleaseInstallProgress) {
-  const listener = tauriMocks.listen.mock.calls[0]?.[1] as ((event: { payload: BlenderReleaseInstallProgress }) => void) | undefined;
-  listener?.({ payload: progress });
+  emitTauriEvent(releaseInstallEvent, progress);
+}
+
+function emitRunningBlenders(processes: RunningBlenderProcess[]) {
+  emitTauriEvent(runningBlendersEvent, processes);
+}
+
+function emitRunningBlenderLog(entry: BlenderLogEntry) {
+  emitTauriEvent(runningBlenderLogEvent, { instanceId: entry.instanceId, entry });
 }
 
 describe("App", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     localStorage.clear();
     tauriMocks.getVersion.mockReset();
@@ -133,11 +191,14 @@ describe("App", () => {
     updaterMocks.checkForAppUpdate.mockResolvedValue(null);
     apiMocks.getLauncherState.mockResolvedValue(launcherState);
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
+    apiMocks.getRunningBlenders.mockResolvedValue([]);
+    apiMocks.getRunningBlenderLogs.mockResolvedValue([runningBlenderLog]);
     apiMocks.getBlenderReleaseDownloads.mockResolvedValue(releaseListing);
     apiMocks.getBlenderConfigs.mockResolvedValue([savedConfig]);
     apiMocks.saveBlenderConfig.mockResolvedValue(savedConfig);
     apiMocks.applyBlenderConfig.mockResolvedValue(undefined);
     apiMocks.removeBlenderConfig.mockResolvedValue(undefined);
+    apiMocks.stopRunningBlender.mockResolvedValue(undefined);
     apiMocks.installBlenderRelease.mockResolvedValue(launcherState);
     apiMocks.cancelBlenderReleaseInstall.mockResolvedValue(undefined);
     apiMocks.launchBlender.mockResolvedValue(launcherState);
@@ -422,6 +483,112 @@ describe("App", () => {
     });
   });
 
+  it("shows running Blender sessions, opens live logs, and stops a session after confirmation", async () => {
+    render(<App />);
+
+    await screen.findByText("Continue where you left off");
+
+    emitRunningBlenders([runningBlender]);
+    expect(await screen.findByText("1 running")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Blender tray/ }));
+    expect(await screen.findByText("Session")).toBeInTheDocument();
+    expect(screen.getByText("Actions")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View live logs" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View live logs" }));
+
+    await waitFor(() => {
+      expect(apiMocks.getRunningBlenderLogs).toHaveBeenCalledWith(runningBlender.instanceId);
+    });
+    expect(await screen.findByText("Loading startup file")).toBeInTheDocument();
+
+    emitRunningBlenderLog({
+      id: "session-1-1",
+      instanceId: runningBlender.instanceId,
+      source: "stderr",
+      message: "Runtime warning",
+      timestamp: 2,
+    });
+    expect(await screen.findByText("Runtime warning")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Stop Blender" }));
+    const stopDialog = await screen.findByRole("alertdialog");
+    expect(within(stopDialog).getByText("Stop Blender 4.2.3?")).toBeInTheDocument();
+    fireEvent.click(within(stopDialog).getByRole("button", { name: "Stop Blender" }));
+
+    await waitFor(() => {
+      expect(apiMocks.stopRunningBlender).toHaveBeenCalledWith(runningBlender.instanceId);
+    });
+  });
+
+  it("keeps only the latest closed session per version/project and normalizes Windows paths", async () => {
+    const firstRunningBlender: RunningBlenderProcess = {
+      ...runningBlender,
+      projectPath: "D:\\Projects\\SharedScene.blend",
+    };
+    const secondRunningBlender: RunningBlenderProcess = {
+      ...runningBlender,
+      instanceId: "session-2",
+      pid: 4343,
+      startedAt: 2,
+      projectPath: "D:/Projects/SharedScene.blend",
+    };
+    const thirdRunningBlender: RunningBlenderProcess = {
+      ...runningBlender,
+      instanceId: "session-3",
+      pid: 4444,
+      startedAt: 3,
+      projectPath: "d:\\projects\\sharedscene.blend",
+    };
+
+    render(<App />);
+
+    await screen.findByText("Continue where you left off");
+
+    emitRunningBlenders([firstRunningBlender]);
+    emitRunningBlenderLog({
+      ...runningBlenderLog,
+      instanceId: firstRunningBlender.instanceId,
+    });
+
+    emitRunningBlenders([secondRunningBlender]);
+    emitRunningBlenderLog({
+      ...runningBlenderLog,
+      id: "session-2-0",
+      instanceId: secondRunningBlender.instanceId,
+      message: "Second session log",
+      timestamp: 2,
+    });
+
+    emitRunningBlenders([thirdRunningBlender]);
+    emitRunningBlenderLog({
+      ...runningBlenderLog,
+      id: "session-3-0",
+      instanceId: thirdRunningBlender.instanceId,
+      message: "Third session log",
+      timestamp: 3,
+    });
+
+    emitRunningBlenders([]);
+
+    expect(await screen.findByText("1 recent session")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Blender tray/ }));
+
+    expect(screen.queryByText("4242")).not.toBeInTheDocument();
+    expect(screen.queryByText("4343")).not.toBeInTheDocument();
+    expect(screen.getByText("4444")).toBeInTheDocument();
+    expect(screen.getAllByText("Closed")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "View logs" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Stop Blender" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View logs" }));
+
+    expect(apiMocks.getRunningBlenderLogs).not.toHaveBeenCalled();
+    expect(await screen.findByText("Third session log")).toBeInTheDocument();
+  });
   it("opens the config menu, saves the current config, applies an existing one, and removes one after confirmation", async () => {
     render(<App />);
 
@@ -475,5 +642,227 @@ describe("App", () => {
       expect(apiMocks.removeBlenderConfig).toHaveBeenCalledWith(savedConfig.id);
     });
   });
+  it("toggles favorites, opens projects, and marks newly installed releases as installed", async () => {
+    const experimentalDownload: BlenderReleaseDownload = {
+      id: "release-exp",
+      channel: "Blender 4.4 Alpha",
+      version: "4.4.0",
+      fileName: "blender-4.4.0-alpha-windows-x64.zip",
+      releaseDate: "2026-03-22",
+      url: "https://download.blender.org/release/Blender4.4/blender-4.4.0-alpha-windows-x64.zip",
+    };
+
+    const experimentalVersion: BlenderVersion = {
+      ...installedVersion,
+      id: "version-44",
+      displayName: "Blender 4.4.0",
+      version: "4.4.0",
+      installDir: "D:\\Users\\Sebastien\\Documents\\VoxelShift\\stable\\Blender 4.4.0",
+    };
+
+    apiMocks.getBlenderReleaseDownloads.mockResolvedValue({
+      ...releaseListing,
+      experimentalGroups: [
+        {
+          platformKey: "windows-x64",
+          platformLabel: "Windows x64",
+          downloads: [experimentalDownload],
+        },
+      ],
+    });
+    apiMocks.installBlenderRelease.mockResolvedValue({
+      ...launcherState,
+      versions: [...launcherState.versions, experimentalVersion],
+    });
+
+    render(<App />);
+
+    await screen.findByText("Continue where you left off");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Test Scene" }));
+    await waitFor(() => {
+      expect(apiMocks.launchBlenderProject).toHaveBeenCalledWith({
+        id: installedVersion.id,
+        projectPath: recentProject.filePath,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Releases" }));
+    await screen.findByText("Stable builds for Windows x64");
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark 4.2.3 as favorite" }));
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(favoriteReleaseStorageKey) ?? "[]")).toEqual([stableDownload.version]);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove 4.2.3 from favorites" }));
+    await waitFor(() => {
+      expect(localStorage.getItem(favoriteReleaseStorageKey)).toBe("[]");
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Experimental" }));
+
+    const experimentalRow = await screen.findByText("4.4.0").then((element) => element.closest("article") as HTMLElement);
+    fireEvent.click(within(experimentalRow).getByRole("button", { name: "Install" }));
+
+    await waitFor(() => {
+      expect(apiMocks.installBlenderRelease).toHaveBeenCalledWith({
+        id: experimentalDownload.id,
+        version: experimentalDownload.version,
+        fileName: experimentalDownload.fileName,
+        url: experimentalDownload.url,
+      });
+    });
+
+    emitInstallProgress({
+      releaseId: experimentalDownload.id,
+      phase: "completed",
+      progressPercent: 100,
+      downloadedBytes: 1024,
+      totalBytes: 1024,
+      speedBytesPerSecond: null,
+      installDir: experimentalVersion.installDir,
+      message: "Installed",
+    });
+
+    await waitFor(() => {
+      expect(within(experimentalRow).getByRole("button", { name: "Launch Blender 4.4.0" })).toBeInTheDocument();
+    });
+  });
+
+  it("refreshes the home page without overlapping interval requests and clears session UI when processes disappear", async () => {
+    vi.useFakeTimers();
+
+    const launcherStateDeferred = createDeferred<LauncherState>();
+    const recentProjectsDeferred = createDeferred<RecentProject[]>();
+    const runningLogsDeferred = createDeferred<BlenderLogEntry[]>();
+
+    apiMocks.getLauncherState.mockImplementationOnce(() => launcherStateDeferred.promise).mockResolvedValue(launcherState);
+    apiMocks.getRecentProjects.mockImplementationOnce(() => recentProjectsDeferred.promise).mockResolvedValue([recentProject]);
+    apiMocks.getRunningBlenderLogs.mockImplementationOnce(() => runningLogsDeferred.promise);
+
+    render(<App />);
+
+    expect(apiMocks.getLauncherState).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getRecentProjects).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(apiMocks.getLauncherState).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getRecentProjects).toHaveBeenCalledTimes(1);
+
+    launcherStateDeferred.resolve(launcherState);
+    recentProjectsDeferred.resolve([recentProject]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(apiMocks.getLauncherState).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getRecentProjects).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+
+    await screen.findByText("Continue where you left off");
+
+    emitRunningBlenders([runningBlender]);
+    expect(await screen.findByText("1 running")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Blender tray/ }));
+    fireEvent.click(screen.getByRole("button", { name: "View live logs" }));
+
+    expect(await screen.findByRole("dialog", { name: "Blender 4.2.3" })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+
+    emitRunningBlenders([]);
+    expect(await screen.findByText("1 recent session")).toBeInTheDocument();
+
+    runningLogsDeferred.resolve([runningBlenderLog]);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("shows log loading and stop errors, then lets the user dismiss the stop dialog", async () => {
+    apiMocks.getRunningBlenderLogs.mockRejectedValueOnce(new Error("Log service offline"));
+    apiMocks.stopRunningBlender.mockRejectedValueOnce(new Error("Stop failed"));
+
+    render(<App />);
+
+    await screen.findByText("Continue where you left off");
+
+    emitRunningBlenders([runningBlender]);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Blender tray/ }));
+    fireEvent.click(screen.getByRole("button", { name: "View live logs" }));
+
+    expect(await screen.findByText("Log service offline")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop Blender" }));
+
+    const stopDialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(stopDialog).getByRole("button", { name: "Stop Blender" }));
+
+    expect(await screen.findByText("Stop failed")).toBeInTheDocument();
+
+    fireEvent.click(within(stopDialog).getByRole("button", { name: "Keep it running" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("surfaces config loading, saving, applying, and removing errors", async () => {
+    apiMocks.getBlenderConfigs.mockRejectedValueOnce(new Error("Config list failed"));
+    apiMocks.saveBlenderConfig.mockRejectedValueOnce(new Error("Save failed"));
+    apiMocks.applyBlenderConfig.mockRejectedValueOnce(new Error("Apply failed"));
+    apiMocks.removeBlenderConfig.mockRejectedValueOnce(new Error("Remove failed"));
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Releases" }));
+    await screen.findByText("Stable builds for Windows x64");
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Apply a config" }));
+
+    expect(await screen.findByText("Config list failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Save config" }));
+
+    fireEvent.change(screen.getByLabelText("Config name"), { target: { value: "Broken Save" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save current config" }));
+
+    expect(await screen.findByText("Save failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Apply a config" }));
+
+    await screen.findByRole("dialog", { name: "Blender 4.2.3" });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(await screen.findByText("Apply failed")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const removeDialog = await screen.findByRole("alertdialog");
+    expect(within(removeDialog).getByText("Remove Studio?")).toBeInTheDocument();
+
+    fireEvent.click(within(removeDialog).getByRole("button", { name: "Remove config" }));
+    expect(await within(removeDialog).findByText("Remove failed")).toBeInTheDocument();
+
+    fireEvent.click(within(removeDialog).getByRole("button", { name: "Keep it" }));
+    await waitFor(() => {
+      expect(screen.queryByText("Remove Studio?")).not.toBeInTheDocument();
+    });
+  });
 });
+
+
+
+
+
+
 

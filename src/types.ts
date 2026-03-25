@@ -70,3 +70,33 @@ export interface BlenderConfigProfile {
   path: string;
   updatedAt: number;
 }
+export type BlenderLogSource = "stdout" | "stderr" | "system";
+
+export interface RunningBlenderProcess {
+  instanceId: string;
+  blenderId: string;
+  blenderDisplayName: string;
+  blenderVersion: string | null;
+  pid: number;
+  startedAt: number;
+  projectPath: string | null;
+  isStopping: boolean;
+}
+
+export interface BlenderLogEntry {
+  id: string;
+  instanceId: string;
+  source: BlenderLogSource;
+  message: string;
+  timestamp: number;
+}
+
+export interface BlenderLogEvent {
+  instanceId: string;
+  entry: BlenderLogEntry;
+}
+export interface BlenderSession extends RunningBlenderProcess {
+  isRunning: boolean;
+  closedAt: number | null;
+  logs: BlenderLogEntry[];
+}

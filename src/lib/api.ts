@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BlenderConfigProfile, BlenderReleaseListing, LauncherState, RecentProject } from "../types";
+import type {
+  BlenderConfigProfile,
+  BlenderLogEntry,
+  BlenderReleaseListing,
+  LauncherState,
+  RecentProject,
+  RunningBlenderProcess,
+} from "../types";
 
 interface RegisterPayload {
   path: string;
@@ -73,6 +80,18 @@ export function launchBlenderProject(payload: LaunchProjectPayload) {
   return invoke<LauncherState>("launch_blender_project", { request: payload });
 }
 
+export function getRunningBlenders() {
+  return invoke<RunningBlenderProcess[]>("get_running_blenders");
+}
+
+export function getRunningBlenderLogs(instanceId: string) {
+  return invoke<BlenderLogEntry[]>("get_running_blender_logs", { instanceId });
+}
+
+export function stopRunningBlender(instanceId: string) {
+  return invoke<void>("stop_running_blender", { instanceId });
+}
+
 export function openVersionLocation(id: string) {
   return invoke<void>("open_version_location", { id });
 }
@@ -104,3 +123,4 @@ export function applyBlenderConfig(payload: ApplyBlenderConfigPayload) {
 export function removeBlenderConfig(configId: string) {
   return invoke<void>("remove_blender_config", { configId });
 }
+
