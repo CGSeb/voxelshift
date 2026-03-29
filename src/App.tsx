@@ -1,9 +1,10 @@
-import { getVersion } from "@tauri-apps/api/app";
+﻿import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useEffectEvent, useState } from "react";
 import { AppUpdateToast } from "./components/AppUpdateToast";
 import { BlenderLogsDialog } from "./components/BlenderLogsDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { PlannerLogsDialog } from "./components/PlannerLogsDialog";
 import { ReleaseConfigDialog } from "./components/releases/ReleaseConfigDialog";
 import { AppFooter } from "./components/layout/AppFooter";
 import { AppLayout } from "./components/layout/AppLayout";
@@ -12,9 +13,14 @@ import type { PageKey } from "./components/layout/AppMenu";
 import {
   applyBlenderConfig,
   cancelBlenderReleaseInstall,
+  createPlannerRun,
+  deletePlannerRun,
+  updatePlannerRun,
   getBlenderConfigs,
   getBlenderReleaseDownloads,
   getLauncherState,
+  getPlannerLogs,
+  getPlannerRuns,
   getRecentProjects,
   refreshManagedBlenderExtensions,
   getRunningBlenderLogs,
@@ -22,6 +28,9 @@ import {
   installBlenderRelease,
   launchBlender,
   launchBlenderProject,
+  pickPlannerBlendFile,
+  pickPlannerBlenderExecutable,
+  pickPlannerOutputFolder,
   removeBlenderConfig,
   removeRecentProject,
   removeBlenderVersion,
@@ -30,6 +39,7 @@ import {
 } from "./lib/api";
 import { checkForAppUpdate, type AppUpdate, type AppUpdateDownloadEvent, type AppUpdateInfo } from "./lib/updater";
 import { HomePage } from "./pages/HomePage";
+import { PlannerPage } from "./pages/PlannerPage";
 import { ReleasesPage } from "./pages/ReleasesPage";
 import type {
   BlenderConfigProfile,
@@ -41,6 +51,9 @@ import type {
   BlenderSession,
   BlenderVersion,
   LauncherState,
+  PlannerLogEntry,
+  PlannerLogEvent,
+  PlannerRunSummary,
   RecentProject,
   ReleaseInstallPhase,
   RunningBlenderProcess,
@@ -50,6 +63,8 @@ const favoriteReleaseStorageKey = "voxelshift.favorite-release-downloads";
 const releaseInstallEvent = "release-install-progress";
 const runningBlendersEvent = "running-blenders-updated";
 const runningBlenderLogEvent = "running-blender-log";
+const plannerRunsEvent = "planner-runs-updated";
+const plannerLogEvent = "planner-log";
 const installCanceledMessage = "Installation canceled.";
 
 type AppUpdatePhase = "checking" | "idle" | "available" | "downloading" | "installing" | "completed" | "failed" | "unavailable";
@@ -59,6 +74,11 @@ type ConfigDialogMode = "save" | "apply";
 const pageMeta: Record<PageKey, { eyebrow: string; title: string; description: string }> = {
   home: {
     eyebrow: "",
+    title: "",
+    description: "",
+  },
+  planner: {
+    eyebrow: "Planner",
     title: "",
     description: "",
   },
@@ -321,6 +341,14 @@ export default function App() {
   const [pendingStopBlenderId, setPendingStopBlenderId] = useState<string | null>(null);
   const [stopBlenderError, setStopBlenderError] = useState<string | null>(null);
   const [stoppingBlenderId, setStoppingBlenderId] = useState<string | null>(null);
+  const [plannerRuns, setPlannerRuns] = useState<PlannerRunSummary[]>([]);
+  const [plannerLogsByRunId, setPlannerLogsByRunId] = useState<Record<string, PlannerLogEntry[]>>({});
+  const [isLoadingPlanner, setIsLoadingPlanner] = useState(false);
+  const [plannerError, setPlannerError] = useState<string | null>(null);
+  const [isCreatingPlannerRun, setIsCreatingPlannerRun] = useState(false);
+  const [plannerCreateError, setPlannerCreateError] = useState<string | null>(null);
+  const [plannerNotice, setPlannerNotice] = useState<string | null>(null);
+  const [activePlannerLogsRunId, setActivePlannerLogsRunId] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -403,6 +431,100 @@ export default function App() {
       return limitBlenderSessions(nextSessions);
     });
   });
+
+  const handlePlannerLogEvent = useEffectEvent((payload: PlannerLogEvent) => {
+    setPlannerLogsByRunId((current) => {
+      const existingLogs = current[payload.runId] ?? [];
+      if (existingLogs.some((entry) => entry.id === payload.entry.id)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [payload.runId]: [...existingLogs, payload.entry],
+      };
+    });
+  });
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    async function loadPlannerRuns() {
+      setIsLoadingPlanner(true);
+      setPlannerError(null);
+
+      try {
+        const runs = await getPlannerRuns();
+        if (!isDisposed) {
+          setPlannerRuns(runs);
+        }
+      } catch (error) {
+        if (!isDisposed) {
+          setPlannerRuns([]);
+          setPlannerError(readErrorMessage(error, "Could not load planner runs."));
+        }
+      } finally {
+        if (!isDisposed) {
+          setIsLoadingPlanner(false);
+        }
+      }
+    }
+
+    void loadPlannerRuns();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let isDisposed = false;
+
+    async function subscribeToPlannerRuns() {
+      unlisten = await listen<PlannerRunSummary[]>(plannerRunsEvent, (event) => {
+        if (isDisposed) {
+          return;
+        }
+
+        setPlannerRuns(event.payload);
+        setPlannerError(null);
+      });
+    }
+
+    void subscribeToPlannerRuns();
+
+    return () => {
+      isDisposed = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let isDisposed = false;
+
+    async function subscribeToPlannerLogs() {
+      unlisten = await listen<PlannerLogEvent>(plannerLogEvent, (event) => {
+        if (isDisposed) {
+          return;
+        }
+
+        handlePlannerLogEvent(event.payload);
+      });
+    }
+
+    void subscribeToPlannerLogs();
+
+    return () => {
+      isDisposed = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -905,6 +1027,118 @@ export default function App() {
     setActiveLogsProcessId(null);
   }
 
+  async function openPlannerLogs(run: PlannerRunSummary) {
+    setActivePlannerLogsRunId(run.id);
+
+    try {
+      const logs = await getPlannerLogs(run.id);
+      setPlannerLogsByRunId((current) => ({
+        ...current,
+        [run.id]: logs,
+      }));
+    } catch (error) {
+      const errorEntry: PlannerLogEntry = {
+        id: `${run.id}-planner-error`,
+        runId: run.id,
+        source: "system",
+        message: readErrorMessage(error, "Could not load planner logs."),
+        timestamp: Math.floor(Date.now() / 1000),
+      };
+      setPlannerLogsByRunId((current) => ({
+        ...current,
+        [run.id]: [...(current[run.id] ?? []), errorEntry],
+      }));
+    }
+  }
+
+  function closePlannerLogs() {
+    setActivePlannerLogsRunId(null);
+  }
+
+  async function browsePlannerBlendFile() {
+    try {
+      setPlannerCreateError(null);
+      return await pickPlannerBlendFile();
+    } catch (error) {
+      setPlannerCreateError(readErrorMessage(error, "Could not open the Blender project picker."));
+      return null;
+    }
+  }
+
+  async function browsePlannerBlenderExecutable() {
+    try {
+      setPlannerCreateError(null);
+      return await pickPlannerBlenderExecutable();
+    } catch (error) {
+      setPlannerCreateError(readErrorMessage(error, "Could not open the Blender picker."));
+      return null;
+    }
+  }
+
+  async function browsePlannerOutputFolder() {
+    try {
+      setPlannerCreateError(null);
+      return await pickPlannerOutputFolder();
+    } catch (error) {
+      setPlannerCreateError(readErrorMessage(error, "Could not open the output folder picker."));
+      return null;
+    }
+  }
+
+  async function schedulePlannerRun(payload: Parameters<typeof createPlannerRun>[0]) {
+    setIsCreatingPlannerRun(true);
+    setPlannerCreateError(null);
+    setPlannerNotice(null);
+
+    try {
+      const createdRun = await createPlannerRun(payload);
+      setPlannerRuns((current) => {
+        const nextRuns = [createdRun, ...current.filter((run) => run.id !== createdRun.id)];
+        return nextRuns;
+      });
+      setPlannerNotice("Scheduled render added to Planner.");
+      return true;
+    } catch (error) {
+      setPlannerCreateError(readErrorMessage(error, "Could not schedule this render."));
+      return false;
+    } finally {
+      setIsCreatingPlannerRun(false);
+    }
+  }
+
+  async function updatePlannerRunById(runId: string, payload: Parameters<typeof createPlannerRun>[0]) {
+    setIsCreatingPlannerRun(true);
+    setPlannerCreateError(null);
+    setPlannerNotice(null);
+
+    try {
+      const updatedRun = await updatePlannerRun(runId, payload);
+      setPlannerRuns((current) => current.map((run) => (run.id === runId ? updatedRun : run)));
+      return true;
+    } catch (error) {
+      setPlannerCreateError(readErrorMessage(error, "Could not update this planned render."));
+      return false;
+    } finally {
+      setIsCreatingPlannerRun(false);
+    }
+  }
+
+  async function deletePlannerRunById(run: PlannerRunSummary) {
+    setPlannerError(null);
+
+    try {
+      await deletePlannerRun(run.id);
+      setPlannerRuns((current) => current.filter((plannerRun) => plannerRun.id !== run.id));
+      setPlannerLogsByRunId((current) => {
+        const next = { ...current };
+        delete next[run.id];
+        return next;
+      });
+    } catch (error) {
+      setPlannerError(readErrorMessage(error, "Could not delete this planner render."));
+    }
+  }
+
   function openStopBlenderDialog(process: BlenderSession) {
     setPendingStopBlenderId(process.instanceId);
     setStopBlenderError(null);
@@ -1167,6 +1401,18 @@ export default function App() {
   }, [activeLogsProcessId, blenderSessions]);
 
   useEffect(() => {
+    if (!activePlannerLogsRunId) {
+      return;
+    }
+
+    if (plannerRuns.some((run) => run.id === activePlannerLogsRunId)) {
+      return;
+    }
+
+    setActivePlannerLogsRunId(null);
+  }, [activePlannerLogsRunId, plannerRuns]);
+
+  useEffect(() => {
     if (!pendingStopBlenderId) {
       return;
     }
@@ -1194,6 +1440,7 @@ export default function App() {
     .map((versionNumber) => installedReleaseVersions.get(versionNumber))
     .filter((version): version is BlenderVersion => Boolean(version));
   const activeLogsProcess = blenderSessions.find((session) => session.instanceId === activeLogsProcessId) ?? null;
+  const activePlannerLogsRun = plannerRuns.find((run) => run.id === activePlannerLogsRunId) ?? null;
   const pendingStopBlender = runningBlenders.find((process) => process.instanceId === pendingStopBlenderId) ?? null;
 
   async function confirmUninstall() {
@@ -1322,6 +1569,23 @@ export default function App() {
             onRequestRemoveProject={openRemoveRecentProjectDialog}
             onLaunchVersion={(version) => void launchInstalledRelease(version)}
           />
+        ) : activePage === "planner" ? (
+          <PlannerPage
+            blenderVersions={launcherState?.versions.filter((version) => version.available) ?? []}
+            plannerRuns={plannerRuns}
+            errorMessage={plannerError}
+            submitErrorMessage={plannerCreateError}
+            noticeMessage={plannerNotice}
+            isLoading={isLoadingPlanner}
+            isCreating={isCreatingPlannerRun}
+            onCreateRun={schedulePlannerRun}
+            onUpdateRun={(runId, payload) => updatePlannerRunById(runId, payload)}
+            onBrowseBlendFile={browsePlannerBlendFile}
+            onBrowseCustomBlender={browsePlannerBlenderExecutable}
+            onBrowseOutputFolder={browsePlannerOutputFolder}
+            onOpenLogs={(run) => void openPlannerLogs(run)}
+            onDeleteRun={(run) => void deletePlannerRunById(run)}
+          />
         ) : (
           <ReleasesPage
             releaseListing={releaseListing}
@@ -1362,6 +1626,13 @@ export default function App() {
         process={activeLogsProcess}
         logs={activeLogsProcess?.logs ?? []}
         onClose={closeRunningBlenderLogs}
+      />
+
+      <PlannerLogsDialog
+        open={activePlannerLogsRun !== null}
+        run={activePlannerLogsRun}
+        logs={activePlannerLogsRun ? plannerLogsByRunId[activePlannerLogsRun.id] ?? [] : []}
+        onClose={closePlannerLogs}
       />
 
       <ReleaseConfigDialog
@@ -1468,6 +1739,12 @@ export default function App() {
     </>
   );
 }
+
+
+
+
+
+
 
 
 

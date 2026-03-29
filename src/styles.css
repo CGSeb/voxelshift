@@ -38,6 +38,7 @@ body,
 #root {
   margin: 0;
   min-height: 100%;
+  overflow-x: clip;
 }
 
 body {
@@ -1815,6 +1816,47 @@ p {
   color: var(--text-strong);
 }
 
+select.release-config-input {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 3rem;
+  border-color: rgba(147, 191, 212, 0.24);
+  color-scheme: dark;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg, rgba(122, 170, 196, 0.08), transparent 120%),
+    #1a1b1c;
+  background-image:
+    linear-gradient(45deg, transparent 50%, rgba(244, 239, 231, 0.9) 50%),
+    linear-gradient(135deg, rgba(244, 239, 231, 0.9) 50%, transparent 50%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    linear-gradient(180deg, rgba(122, 170, 196, 0.08), transparent 120%);
+  background-position:
+    calc(100% - 20px) calc(50% - 2px),
+    calc(100% - 14px) calc(50% - 2px),
+    0 0,
+    0 0;
+  background-size:
+    6px 6px,
+    6px 6px,
+    100% 100%,
+    100% 100%;
+  background-repeat: no-repeat;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+select.release-config-input:hover {
+  border-color: rgba(147, 191, 212, 0.34);
+}
+
+select.release-config-input option {
+  background-color: #1b1c1d;
+  color: var(--text-strong);
+}
+
 .release-config-input:focus-visible {
   outline: 2px solid rgba(var(--accent-rgb), 0.5);
   outline-offset: 2px;
@@ -2085,6 +2127,12 @@ p {
   color: #fff0f0;
 }
 
+.running-blender-action-button:disabled,
+.running-blender-action-button-danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .blender-logs-dialog {
   width: min(960px, 100%);
   max-height: min(760px, calc(100vh - 48px));
@@ -2210,5 +2258,645 @@ p {
     gap: 4px;
   }
 }
+
+
+
+.planner-page,
+.planner-run-list,
+.planner-run-title-block,
+.planner-run-grid,
+.planner-form-card,
+.planner-form-copy,
+.planner-overview-grid {
+  display: grid;
+}
+
+.planner-page,
+.planner-run-list,
+.planner-form-card {
+  gap: 24px;
+}
+
+.planner-hero,
+.planner-form-card,
+.planner-runs-panel,
+.planner-run-card {
+  border: 1px solid var(--border-soft);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 46%),
+    var(--surface);
+  backdrop-filter: blur(22px);
+  box-shadow: var(--shadow-lg);
+}
+
+.planner-hero,
+.planner-form-card,
+.planner-runs-panel {
+  border-radius: 26px;
+  padding: 24px;
+}
+
+.planner-hero,
+.planner-hero-actions {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.planner-hero-copy {
+  display: grid;
+  gap: 10px;
+  max-width: 70ch;
+}
+
+.planner-hero-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.planner-overview-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.planner-overview-card {
+  min-height: 180px;
+}
+
+.planner-state-success {
+  border-color: rgba(112, 199, 114, 0.28);
+}
+
+.planner-form-card {
+  gap: 18px;
+}
+
+.planner-form-card-modal {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.planner-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.planner-form-grid-schedule {
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1.4fr);
+}
+
+.planner-date-picker {
+  position: relative;
+}
+
+.planner-date-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+}
+
+.planner-date-trigger-open {
+  border-color: rgba(var(--accent-rgb), 0.48);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 0 0 3px rgba(var(--accent-rgb), 0.12),
+    0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+.planner-date-trigger-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.planner-date-trigger-icon {
+  flex-shrink: 0;
+  color: rgba(198, 233, 214, 0.86);
+}
+
+.planner-date-trigger-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planner-date-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 6;
+  display: grid;
+  gap: 16px;
+  width: min(360px, calc(100vw - 88px));
+  padding: 16px;
+  border: 1px solid rgba(147, 191, 212, 0.18);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 38%),
+    linear-gradient(180deg, rgba(122, 170, 196, 0.08), transparent 120%),
+    #141414;
+  box-shadow: 0 26px 54px rgba(0, 0, 0, 0.38);
+}
+
+.planner-date-popover-header,
+.planner-date-calendar-header,
+.planner-date-time-copy,
+.planner-date-time-inputs {
+  display: flex;
+  align-items: center;
+}
+
+.planner-date-popover-header,
+.planner-date-calendar-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.planner-date-summary {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.92rem;
+}
+
+.planner-date-month-label {
+  color: var(--text-strong);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.planner-date-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: var(--text-strong);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.planner-date-nav:hover,
+.planner-date-nav:focus-visible,
+.planner-date-day:hover,
+.planner-date-day:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.planner-date-weekdays,
+.planner-date-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.planner-date-weekdays {
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.planner-date-weekdays span,
+.planner-date-day {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.planner-date-grid {
+  gap: 6px;
+}
+
+.planner-date-day {
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 14px;
+  color: var(--text-strong);
+  background: transparent;
+  font-size: 0.95rem;
+}
+
+.planner-date-day-muted {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.planner-date-day-today {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.planner-date-day-selected {
+  color: #dfffea;
+  background: rgba(var(--accent-rgb), 0.16);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.38);
+}
+
+.planner-date-time-panel {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.planner-date-time-copy {
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 0.92rem;
+}
+
+.planner-date-time-inputs {
+  gap: 10px;
+}
+
+.planner-date-time-group {
+  display: grid;
+  gap: 8px;
+  flex: 1;
+}
+
+.planner-date-time-group span {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.planner-date-time-input {
+  text-align: center;
+}
+
+.planner-date-time-separator {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 1.3rem;
+  line-height: 1;
+  padding-top: 22px;
+}
+
+.planner-select-shell {
+  position: relative;
+}
+
+.planner-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+}
+
+.planner-select-trigger-open {
+  border-color: rgba(var(--accent-rgb), 0.48);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 0 0 3px rgba(var(--accent-rgb), 0.12),
+    0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+.planner-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planner-select-chevron {
+  flex-shrink: 0;
+  color: rgba(244, 239, 231, 0.82);
+  transition: transform 160ms ease;
+}
+
+.planner-select-chevron-open {
+  transform: rotate(180deg);
+}
+
+.planner-select-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(147, 191, 212, 0.18);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 45%),
+    linear-gradient(180deg, rgba(122, 170, 196, 0.08), transparent 120%),
+    #141414;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.34);
+}
+
+.planner-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  border: 0;
+  border-radius: 12px;
+  padding: 0.78rem 0.9rem;
+  color: var(--text-strong);
+  background: transparent;
+  text-align: left;
+}
+
+.planner-select-option:hover,
+.planner-select-option:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.planner-select-option-active {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: #dfffea;
+}
+
+.planner-select-option-empty {
+  color: rgba(255, 255, 255, 0.66);
+  cursor: default;
+}
+
+.planner-select-check {
+  flex-shrink: 0;
+  color: #b9ffd7;
+}
+.planner-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.planner-input-row .release-config-input {
+  min-width: 0;
+  flex: 1;
+}
+
+.planner-inline-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.planner-checkbox-field {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(147, 191, 212, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.planner-checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.planner-checkbox-input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: rgb(var(--accent-rgb));
+}
+
+.planner-checkbox-copy {
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.planner-form-actions {
+  margin-top: 0;
+}
+
+.planner-runs-panel {
+  display: grid;
+  width: 100%;
+  gap: 18px;
+}
+
+.planner-empty-state {
+  margin-top: 28px;
+}
+
+.planner-schedule-dialog {
+  width: min(760px, 100%);
+}
+
+.planner-run-list {
+  gap: 14px;
+}
+
+.planner-run-card {
+  gap: 18px;
+  border-radius: 24px;
+  padding: 18px;
+}
+
+.planner-run-header,
+.planner-run-footer,
+.planner-status-line,
+.planner-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.planner-run-header,
+.planner-run-footer {
+  justify-content: space-between;
+}
+
+.planner-run-header {
+  gap: 16px;
+  min-width: 0;
+}
+
+.planner-status-line {
+  flex-wrap: wrap;
+}
+
+.planner-run-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.planner-run-title-block {
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.planner-run-title-block h4 {
+  color: var(--text-strong);
+  font-size: 1.2rem;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.planner-run-title-block p,
+.planner-run-footer p,
+.planner-run-grid p {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.planner-run-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.planner-run-grid div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.planner-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.planner-status-dot-pending {
+  background: #ffd25f;
+  box-shadow: 0 0 14px rgba(255, 210, 95, 0.35);
+}
+
+.planner-status-dot-running {
+  background: var(--accent);
+  box-shadow: 0 0 14px rgba(var(--accent-rgb), 0.35);
+}
+
+.planner-status-dot-completed {
+  background: #6ea7ff;
+  box-shadow: 0 0 14px rgba(110, 167, 255, 0.3);
+}
+
+.planner-status-dot-failed {
+  background: #ff8d8d;
+  box-shadow: 0 0 14px rgba(255, 141, 141, 0.28);
+}
+
+.planner-status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.34rem 0.72rem;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.planner-status-pill-pending {
+  background: rgba(255, 210, 95, 0.16);
+  color: #ffe9a7;
+}
+
+.planner-status-pill-running {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: #c4ffe0;
+}
+
+.planner-status-pill-completed {
+  background: rgba(110, 167, 255, 0.16);
+  color: #d8e7ff;
+}
+
+.planner-status-pill-failed {
+  background: rgba(255, 117, 117, 0.14);
+  color: #ffd0d0;
+}
+
+.planner-status-schedule {
+  color: rgba(232, 240, 238, 0.7);
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+}
+
+@media (max-width: 1100px) {
+  .planner-form-grid-schedule {
+    grid-template-columns: 1fr;
+  }
+
+  .planner-date-popover {
+    width: 100%;
+  }
+
+  .planner-overview-grid,
+  .planner-run-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .planner-hero,
+  .planner-hero-actions,
+  .planner-form-card,
+  .planner-runs-panel {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 20px;
+  }
+
+  .planner-input-row,
+  .planner-run-header,
+  .planner-run-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .planner-inline-button {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+@media (max-width: 640px) {
+  .planner-date-popover {
+    width: min(100%, calc(100vw - 48px));
+    padding: 14px;
+  }
+
+  .planner-date-time-copy,
+  .planner-date-time-inputs {
+    align-items: flex-start;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
 
 

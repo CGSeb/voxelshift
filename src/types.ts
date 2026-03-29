@@ -70,6 +70,7 @@ export interface BlenderConfigProfile {
   path: string;
   updatedAt: number;
 }
+
 export type BlenderLogSource = "stdout" | "stderr" | "system";
 
 export interface RunningBlenderProcess {
@@ -95,8 +96,53 @@ export interface BlenderLogEvent {
   instanceId: string;
   entry: BlenderLogEntry;
 }
+
 export interface BlenderSession extends RunningBlenderProcess {
   isRunning: boolean;
   closedAt: number | null;
   logs: BlenderLogEntry[];
 }
+
+export type PlannerRunStatus = "pending" | "running" | "completed" | "failed";
+export type PlannerBlenderSource = "library" | "custom";
+
+export interface PlannerBlenderTarget {
+  source: PlannerBlenderSource;
+  versionId: string | null;
+  displayName: string;
+  executablePath: string;
+}
+
+export interface PlannerRunSummary {
+  id: string;
+  blendFilePath: string;
+  startFrame: number;
+  endFrame: number;
+  startAt: number;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  status: PlannerRunStatus;
+  blenderTarget: PlannerBlenderTarget;
+  currentFrame: number | null;
+  renderedFrameCount: number;
+  averageRenderTimeSeconds: number | null;
+  estimatedRemainingSeconds: number | null;
+  pid: number | null;
+  lastErrorMessage: string | null;
+  exitCode: number | null;
+}
+
+export interface PlannerLogEntry {
+  id: string;
+  runId: string;
+  source: BlenderLogSource;
+  message: string;
+  timestamp: number;
+}
+
+export interface PlannerLogEvent {
+  runId: string;
+  entry: PlannerLogEntry;
+}
+

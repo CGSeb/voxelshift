@@ -25,8 +25,8 @@ describe("AppLayout", () => {
     expect(screen.getByText("Main content")).toBeInTheDocument();
     expect(screen.getByText("Footer content")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Releases" }));
-    expect(onNavigate).toHaveBeenCalledWith("releases");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    expect(onNavigate).toHaveBeenCalledWith("planner");
   });
 
   it("omits optional metadata blocks when they are not provided", () => {
