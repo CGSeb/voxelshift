@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+﻿import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
@@ -9,6 +9,8 @@ import type {
   BlenderReleaseListing,
   BlenderVersion,
   LauncherState,
+  PlannerLogEntry,
+  PlannerRunSummary,
   RecentProject,
   RunningBlenderProcess,
 } from "./types";
@@ -21,9 +23,14 @@ const tauriMocks = vi.hoisted(() => ({
 const apiMocks = vi.hoisted(() => ({
   applyBlenderConfig: vi.fn(),
   cancelBlenderReleaseInstall: vi.fn(),
+  createPlannerRun: vi.fn(),
+  deletePlannerRun: vi.fn(),
+  updatePlannerRun: vi.fn(),
   getBlenderConfigs: vi.fn(),
   getBlenderReleaseDownloads: vi.fn(),
   getLauncherState: vi.fn(),
+  getPlannerLogs: vi.fn(),
+  getPlannerRuns: vi.fn(),
   getRecentProjects: vi.fn(),
   refreshManagedBlenderExtensions: vi.fn(),
   getRunningBlenderLogs: vi.fn(),
@@ -31,6 +38,9 @@ const apiMocks = vi.hoisted(() => ({
   installBlenderRelease: vi.fn(),
   launchBlender: vi.fn(),
   launchBlenderProject: vi.fn(),
+  pickPlannerBlendFile: vi.fn(),
+  pickPlannerBlenderExecutable: vi.fn(),
+  pickPlannerOutputFolder: vi.fn(),
   removeBlenderConfig: vi.fn(),
   removeRecentProject: vi.fn(),
   removeBlenderVersion: vi.fn(),
@@ -138,9 +148,51 @@ const runningBlenderLog: BlenderLogEntry = {
   timestamp: 1,
 };
 
+const plannerRun: PlannerRunSummary = {
+  id: "planner-1",
+  blendFilePath: "D:\\Projects\\render-scene.blend",
+  startFrame: 1,
+  endFrame: 120,
+  startAt: 1_700_000_000,
+  outputFolderPath: "D:\\Renders\\Shot_010",
+  createdAt: 1_700_000_000,
+  startedAt: null,
+  completedAt: null,
+  status: "pending",
+  blenderTarget: {
+    source: "library",
+    versionId: installedVersion.id,
+    displayName: installedVersion.displayName,
+    executablePath: installedVersion.executablePath,
+  },
+  currentFrame: null,
+  renderedFrameCount: 0,
+  averageRenderTimeSeconds: null,
+  estimatedRemainingSeconds: null,
+  pid: null,
+  lastErrorMessage: null,
+  exitCode: null,
+};
+
+const updatedPlannerRun: PlannerRunSummary = {
+  ...plannerRun,
+  endFrame: 180,
+  outputFolderPath: "D:\\Renders\\Shot_010",
+};
+
+const plannerLog: PlannerLogEntry = {
+  id: "planner-1-0",
+  runId: plannerRun.id,
+  source: "stdout",
+  message: "Fra:1 Mem:30.00M",
+  timestamp: 2,
+};
+
 const releaseInstallEvent = "release-install-progress";
 const runningBlendersEvent = "running-blenders-updated";
 const runningBlenderLogEvent = "running-blender-log";
+const plannerRunsEvent = "planner-runs-updated";
+const plannerLogEvent = "planner-log";
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -173,6 +225,14 @@ function emitRunningBlenderLog(entry: BlenderLogEntry) {
   emitTauriEvent(runningBlenderLogEvent, { instanceId: entry.instanceId, entry });
 }
 
+function emitPlannerRuns(runs: PlannerRunSummary[]) {
+  emitTauriEvent(plannerRunsEvent, runs);
+}
+
+function emitPlannerLog(entry: PlannerLogEntry) {
+  emitTauriEvent(plannerLogEvent, { runId: entry.runId, entry });
+}
+
 describe("App", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -192,6 +252,8 @@ describe("App", () => {
     tauriMocks.listen.mockResolvedValue(vi.fn());
     updaterMocks.checkForAppUpdate.mockResolvedValue(null);
     apiMocks.getLauncherState.mockResolvedValue(launcherState);
+    apiMocks.getPlannerLogs.mockResolvedValue([plannerLog]);
+    apiMocks.getPlannerRuns.mockResolvedValue([]);
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
     apiMocks.refreshManagedBlenderExtensions.mockResolvedValue(1);
     apiMocks.getRunningBlenders.mockResolvedValue([]);
@@ -206,6 +268,12 @@ describe("App", () => {
     apiMocks.cancelBlenderReleaseInstall.mockResolvedValue(undefined);
     apiMocks.launchBlender.mockResolvedValue(launcherState);
     apiMocks.launchBlenderProject.mockResolvedValue(launcherState);
+    apiMocks.pickPlannerBlendFile.mockResolvedValue(null);
+    apiMocks.pickPlannerBlenderExecutable.mockResolvedValue(null);
+    apiMocks.pickPlannerOutputFolder.mockResolvedValue(null);
+    apiMocks.createPlannerRun.mockResolvedValue(plannerRun);
+    apiMocks.deletePlannerRun.mockResolvedValue(undefined);
+    apiMocks.updatePlannerRun.mockResolvedValue(updatedPlannerRun);
     apiMocks.removeRecentProject.mockResolvedValue([]);
     apiMocks.removeBlenderVersion.mockResolvedValue({ ...launcherState, versions: [] });
   });
@@ -736,6 +804,160 @@ describe("App", () => {
     });
   });
 
+  it("schedules planner renders, shows live planner updates, and opens planner logs", async () => {
+    apiMocks.pickPlannerBlendFile.mockResolvedValueOnce(plannerRun.blendFilePath);
+    apiMocks.pickPlannerOutputFolder.mockResolvedValueOnce("D:\\Renders\\Shot_010");
+
+    render(<App />);
+
+    await screen.findByText("Continue where you left off");
+
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    await screen.findByText("Planned and past renders");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Schedule" })[0]);
+    await screen.findByRole("dialog", { name: "Schedule a background animation render" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Browse blend file" }));
+    await waitFor(() => {
+      expect(apiMocks.pickPlannerBlendFile).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByLabelText("Override output folder"));
+    fireEvent.click(screen.getByRole("button", { name: "Browse output folder" }));
+
+    await waitFor(() => {
+      expect(apiMocks.pickPlannerOutputFolder).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Schedule render" }));
+
+    await waitFor(() => {
+      expect(apiMocks.createPlannerRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blendFilePath: plannerRun.blendFilePath,
+          startFrame: 1,
+          endFrame: 250,
+          outputFolderPath: "D:\\Renders\\Shot_010",
+          blender: {
+            source: "library",
+            versionId: installedVersion.id,
+            executablePath: null,
+          },
+        }),
+      );
+    });
+
+    expect(screen.getByRole("button", { name: "Edit render-scene.blend" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open logs for render-scene.blend" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit render-scene.blend" }));
+
+    const editDialog = await screen.findByRole("dialog", { name: "Edit a planned background animation render" });
+    fireEvent.change(within(editDialog).getByLabelText("End frame"), { target: { value: "180" } });
+    fireEvent.click(within(editDialog).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updatePlannerRun).toHaveBeenCalledWith(
+        plannerRun.id,
+        expect.objectContaining({
+          blendFilePath: plannerRun.blendFilePath,
+          startFrame: 1,
+          endFrame: 180,
+          outputFolderPath: "D:\\Renders\\Shot_010",
+          blender: {
+            source: "library",
+            versionId: installedVersion.id,
+            executablePath: null,
+          },
+        }),
+      );
+    });
+
+    emitPlannerRuns([
+      {
+        ...updatedPlannerRun,
+        status: "running",
+        startedAt: updatedPlannerRun.startAt,
+        currentFrame: 4,
+        renderedFrameCount: 4,
+        averageRenderTimeSeconds: 3,
+        estimatedRemainingSeconds: 528,
+        pid: 4242,
+      },
+    ]);
+
+    expect(await screen.findByText("Frame 4 of 180")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open logs for render-scene.blend" })).toBeInTheDocument();
+
+    apiMocks.createPlannerRun.mockResolvedValueOnce({
+      ...updatedPlannerRun,
+      id: "planner-2",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate render-scene.blend" }));
+
+    const duplicateDialog = await screen.findByRole("dialog", { name: "Schedule a background animation render" });
+    expect(within(duplicateDialog).getByDisplayValue(updatedPlannerRun.blendFilePath)).toBeInTheDocument();
+    expect(within(duplicateDialog).getByDisplayValue("180")).toBeInTheDocument();
+    expect(within(duplicateDialog).getByDisplayValue("D:\\Renders\\Shot_010")).toBeInTheDocument();
+    expect(within(duplicateDialog).getByLabelText("Override output folder")).toBeChecked();
+
+    fireEvent.click(within(duplicateDialog).getByRole("button", { name: "Schedule render" }));
+
+    await waitFor(() => {
+      expect(apiMocks.createPlannerRun).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          blendFilePath: updatedPlannerRun.blendFilePath,
+          startFrame: 1,
+          endFrame: 180,
+          outputFolderPath: "D:\\Renders\\Shot_010",
+          blender: {
+            source: "library",
+            versionId: installedVersion.id,
+            executablePath: null,
+          },
+        }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open logs for render-scene.blend" }));
+
+    await waitFor(() => {
+      expect(apiMocks.getPlannerLogs).toHaveBeenCalledWith(plannerRun.id);
+    });
+    expect(await screen.findByText("Fra:1 Mem:30.00M")).toBeInTheDocument();
+
+    emitPlannerLog({
+      ...plannerLog,
+      id: "planner-1-1",
+      message: "Fra:2 Mem:31.00M",
+      timestamp: 3,
+    });
+
+    expect(await screen.findByText("Fra:2 Mem:31.00M")).toBeInTheDocument();
+
+    emitPlannerRuns([
+      {
+        ...updatedPlannerRun,
+        status: "completed",
+        startedAt: updatedPlannerRun.startAt,
+        completedAt: updatedPlannerRun.startAt + 120,
+        currentFrame: 180,
+        renderedFrameCount: 180,
+        averageRenderTimeSeconds: 3,
+        estimatedRemainingSeconds: null,
+        pid: null,
+      },
+    ]);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete render-scene.blend" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deletePlannerRun).toHaveBeenCalledWith(plannerRun.id);
+    });
+  });
+
   it("refreshes the home page without overlapping interval requests and clears session UI when processes disappear", async () => {
     vi.useFakeTimers();
 
@@ -887,6 +1109,23 @@ describe("App", () => {
     });
   });
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

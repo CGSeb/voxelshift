@@ -1,9 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+﻿import { invoke } from "@tauri-apps/api/core";
 import type {
   BlenderConfigProfile,
   BlenderLogEntry,
   BlenderReleaseListing,
   LauncherState,
+  PlannerLogEntry,
+  PlannerRunSummary,
   RecentProject,
   RunningBlenderProcess,
 } from "../types";
@@ -38,6 +40,19 @@ interface SaveBlenderConfigPayload {
 interface ApplyBlenderConfigPayload {
   versionId: string;
   configId: string;
+}
+
+export interface CreatePlannerRunPayload {
+  blendFilePath: string;
+  startFrame: number;
+  endFrame: number;
+  startAt: number;
+  outputFolderPath?: string | null;
+  blender: {
+    source: "library" | "custom";
+    versionId?: string | null;
+    executablePath?: string | null;
+  };
 }
 
 export function getLauncherState() {
@@ -130,6 +145,38 @@ export function applyBlenderConfig(payload: ApplyBlenderConfigPayload) {
 
 export function removeBlenderConfig(configId: string) {
   return invoke<void>("remove_blender_config", { configId });
+}
+
+export function getPlannerRuns() {
+  return invoke<PlannerRunSummary[]>("get_planner_runs");
+}
+
+export function getPlannerLogs(runId: string) {
+  return invoke<PlannerLogEntry[]>("get_planner_logs", { runId });
+}
+
+export function deletePlannerRun(runId: string) {
+  return invoke<void>("delete_planner_run", { runId });
+}
+
+export function updatePlannerRun(runId: string, payload: CreatePlannerRunPayload) {
+  return invoke<PlannerRunSummary>("update_planner_run", { runId, request: payload });
+}
+
+export function createPlannerRun(payload: CreatePlannerRunPayload) {
+  return invoke<PlannerRunSummary>("create_planner_run", { request: payload });
+}
+
+export function pickPlannerBlendFile() {
+  return invoke<string | null>("pick_planner_blend_file");
+}
+
+export function pickPlannerBlenderExecutable() {
+  return invoke<string | null>("pick_planner_blender_executable");
+}
+
+export function pickPlannerOutputFolder() {
+  return invoke<string | null>("pick_planner_output_folder");
 }
 
 

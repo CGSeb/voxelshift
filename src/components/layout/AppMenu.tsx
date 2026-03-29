@@ -1,4 +1,4 @@
-export type PageKey = "home" | "releases";
+export type PageKey = "home" | "planner" | "releases";
 
 interface AppMenuProps {
   activePage: PageKey;
@@ -21,6 +21,13 @@ export function AppMenu({ activePage, onNavigate }: AppMenuProps) {
         onClick={() => onNavigate("releases")}
       >
         Releases
+      </button>
+      <button
+        className={activePage === "planner" ? "page-tab page-tab-active" : "page-tab"}
+        type="button"
+        onClick={() => onNavigate("planner")}
+      >
+        Planner
       </button>
     </nav>
   );

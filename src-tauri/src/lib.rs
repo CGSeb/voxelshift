@@ -1,4 +1,4 @@
-use futures_util::StreamExt;
+﻿use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
@@ -20,6 +20,8 @@ use tauri::{
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+mod planner;
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
@@ -476,6 +478,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ReleaseInstallControl::default())
         .manage(RunningBlenderRegistry::default())
+        .manage(planner::PlannerRegistry::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -490,6 +493,10 @@ pub fn run() {
 
             if let Err(error) = refresh_managed_blender_extensions_internal(&app.handle()) {
                 eprintln!("Unable to refresh managed Blender extensions: {error}");
+            }
+
+            if let Err(error) = planner::initialize(&app.handle(), app.state::<planner::PlannerRegistry>().inner()) {
+                eprintln!("Unable to initialize planner state: {error}");
             }
 
             Ok(())
@@ -528,6 +535,14 @@ pub fn run() {
             get_running_blenders,
             get_running_blender_logs,
             stop_running_blender,
+            get_planner_runs,
+            get_planner_logs,
+            delete_planner_run,
+            update_planner_run,
+            create_planner_run,
+            pick_planner_blend_file,
+            pick_planner_blender_executable,
+            pick_planner_output_folder,
             open_version_location,
             get_blender_release_downloads,
             install_blender_release,
@@ -573,6 +588,114 @@ fn get_running_blender_logs(
     instance_id: String,
 ) -> Result<Vec<BlenderLogEntry>, String> {
     running_blenders.logs(&instance_id)
+}
+
+#[tauri::command]
+fn get_planner_runs(
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+) -> Result<Vec<planner::PlannerRunSummary>, String> {
+    planner::get_planner_runs(planner)
+}
+
+#[tauri::command]
+fn get_planner_logs(
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+    run_id: String,
+) -> Result<Vec<planner::PlannerLogEntry>, String> {
+    planner::get_planner_logs(planner, run_id)
+}
+
+#[tauri::command]
+fn delete_planner_run(
+    app: AppHandle,
+    planner_state: tauri::State<'_, planner::PlannerRegistry>,
+    run_id: String,
+) -> Result<(), String> {
+    planner::delete_planner_run(&app, planner_state.inner(), run_id)
+}
+
+fn resolve_planner_run_request(
+    app: &AppHandle,
+    request: planner::CreatePlannerRunRequest,
+) -> Result<planner::ResolvedPlannerRunRequest, String> {
+    let blend_file_path = planner::validate_blend_file_path(&request.blend_file_path)?;
+    let (start_frame, end_frame) = planner::validate_frame_range(request.start_frame, request.end_frame)?;
+    let output_folder_path = request
+        .output_folder_path
+        .as_deref()
+        .map(planner::validate_output_folder_path)
+        .transpose()?;
+
+    let blender_target = match request.blender.source {
+        planner::PlannerBlenderSource::Library => {
+            let version_id = request
+                .blender
+                .version_id
+                .clone()
+                .ok_or_else(|| "Please choose a Blender from the library.".to_string())?;
+            let state = build_launcher_state(app)?;
+            let version = resolve_launch_version(&state.versions, &version_id)?;
+
+            planner::PlannerBlenderTarget {
+                source: planner::PlannerBlenderSource::Library,
+                version_id: Some(version.id.clone()),
+                display_name: version.display_name.clone(),
+                executable_path: version.executable_path.clone(),
+            }
+        }
+        planner::PlannerBlenderSource::Custom => {
+            let executable_path = request
+                .blender
+                .executable_path
+                .as_deref()
+                .ok_or_else(|| "Please choose a Blender executable.".to_string())?;
+            planner::validate_custom_blender_target(executable_path)?
+        }
+    };
+
+    Ok(planner::ResolvedPlannerRunRequest {
+        blend_file_path,
+        start_frame,
+        end_frame,
+        start_at: request.start_at,
+        output_folder_path,
+        blender_target,
+    })
+}
+
+#[tauri::command]
+fn update_planner_run(
+    app: AppHandle,
+    planner_state: tauri::State<'_, planner::PlannerRegistry>,
+    run_id: String,
+    request: planner::CreatePlannerRunRequest,
+) -> Result<planner::PlannerRunSummary, String> {
+    let resolved_request = resolve_planner_run_request(&app, request)?;
+    planner::update_planner_run(&app, planner_state.inner(), run_id, resolved_request)
+}
+
+#[tauri::command]
+fn create_planner_run(
+    app: AppHandle,
+    planner_state: tauri::State<'_, planner::PlannerRegistry>,
+    request: planner::CreatePlannerRunRequest,
+) -> Result<planner::PlannerRunSummary, String> {
+    let resolved_request = resolve_planner_run_request(&app, request)?;
+    planner::create_planner_run(&app, planner_state.inner(), resolved_request)
+}
+#[tauri::command]
+fn pick_planner_blend_file() -> Result<Option<String>, String> {
+    planner::pick_planner_blend_file()
+}
+
+#[tauri::command]
+fn pick_planner_blender_executable() -> Result<Option<String>, String> {
+    planner::pick_planner_blender_executable()
+}
+
+#[tauri::command]
+fn pick_planner_output_folder() -> Result<Option<String>, String> {
+    planner::pick_planner_output_folder()
 }
 
 #[tauri::command]
@@ -5121,6 +5244,7 @@ mod tests {
     }
 
 }
+
 
 
 
