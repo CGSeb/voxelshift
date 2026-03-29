@@ -44,6 +44,8 @@ def recent_blender_saved(_):
     previous_render_res_y = bpy.context.scene.render.resolution_y
     previous_render_format = bpy.context.scene.render.image_settings.file_format
     previous_render_percent = bpy.context.scene.render.resolution_percentage
+    previous_render_videwport_shade = bpy.context.space_data.shading.type
+    previous_transparent = bpy.context.scene.render.film_transparent
 
     render_name = "VS_THUMB_"+ os.path.basename(bpy.data.filepath).replace(".blend", "")
     bpy.context.scene.render.filepath = os.path.join(os.path.dirname(os.path.realpath(__file__)), render_name)
@@ -51,7 +53,8 @@ def recent_blender_saved(_):
     bpy.context.scene.render.resolution_y = 256
     bpy.context.scene.render.image_settings.file_format = 'JPEG'
     bpy.context.scene.render.resolution_percentage = 100
-
+    bpy.context.space_data.shading.type = 'SOLID'
+    bpy.context.scene.render.film_transparent = False
 
     bpy.ops.render.opengl(write_still=True)
 
@@ -60,6 +63,8 @@ def recent_blender_saved(_):
     bpy.context.scene.render.resolution_y = previous_render_res_y
     bpy.context.scene.render.image_settings.file_format = previous_render_format
     bpy.context.scene.render.resolution_percentage = previous_render_percent
+    bpy.context.space_data.shading.type = previous_render_videwport_shade
+    bpy.context.scene.render.film_transparent = previous_transparent
 
 def register():
     if not os.path.exists(json_file_path):

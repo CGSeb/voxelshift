@@ -48,6 +48,14 @@ export function getRecentProjects() {
   return invoke<RecentProject[]>("get_recent_projects");
 }
 
+export function refreshManagedBlenderExtensions() {
+  return invoke<number>("refresh_managed_blender_extensions");
+}
+
+export function removeRecentProject(filePath: string) {
+  return invoke<RecentProject[]>("remove_recent_project", { filePath });
+}
+
 export function scanForBlenderVersions() {
   return invoke<LauncherState>("scan_for_blender_versions");
 }
@@ -123,4 +131,5 @@ export function applyBlenderConfig(payload: ApplyBlenderConfigPayload) {
 export function removeBlenderConfig(configId: string) {
   return invoke<void>("remove_blender_config", { configId });
 }
+
 

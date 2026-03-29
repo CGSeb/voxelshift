@@ -14,6 +14,7 @@ import {
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
+  refreshManagedBlenderExtensions,
   getRunningBlenderLogs,
   getRunningBlenders,
   installBlenderRelease,
@@ -22,6 +23,7 @@ import {
   openVersionLocation,
   registerBlenderVersion,
   removeBlenderConfig,
+  removeRecentProject,
   removeBlenderVersion,
   removeScanRoot,
   saveBlenderConfig,
@@ -50,6 +52,8 @@ describe("api wrappers", () => {
 
     await getLauncherState();
     await getRecentProjects();
+    await refreshManagedBlenderExtensions();
+    await removeRecentProject("D:\\scene.blend");
     await scanForBlenderVersions();
     await registerBlenderVersion({ path: "D:\\Blender\\blender.exe", label: "Stable" });
     await setDefaultBlenderVersion("version-1");
@@ -73,6 +77,8 @@ describe("api wrappers", () => {
     expect(invokeMock.mock.calls).toEqual([
       ["get_launcher_state"],
       ["get_recent_projects"],
+      ["refresh_managed_blender_extensions"],
+      ["remove_recent_project", { filePath: "D:\\scene.blend" }],
       ["scan_for_blender_versions"],
       ["register_blender_version", { request: { path: "D:\\Blender\\blender.exe", label: "Stable" } }],
       ["set_default_blender_version", { id: "version-1" }],
@@ -95,3 +101,9 @@ describe("api wrappers", () => {
     ]);
   });
 });
+
+
+
+
+
+

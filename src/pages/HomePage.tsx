@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { isBlenderLtsVersion } from "../lib/blenderVersions";
 import type { BlenderVersion, RecentProject } from "../types";
@@ -10,6 +10,7 @@ interface HomePageProps {
   errorMessage: string | null;
   onBrowseReleases: () => void;
   onOpenProject: (project: RecentProject) => void;
+  onRequestRemoveProject: (project: RecentProject) => void;
   onLaunchVersion: (version: BlenderVersion) => void;
 }
 
@@ -124,6 +125,7 @@ export function HomePage({
   errorMessage,
   onBrowseReleases,
   onOpenProject,
+  onRequestRemoveProject,
   onLaunchVersion,
 }: HomePageProps) {
   const [failedThumbnailIds, setFailedThumbnailIds] = useState<Record<string, boolean>>({});
@@ -204,6 +206,18 @@ export function HomePage({
 
               return (
                 <article className="home-card home-card-project" key={project.id}>
+                  {!project.exists ? (
+                    <div className="home-card-actions home-card-actions-overlay">
+                      <button
+                        className="home-card-icon-button home-card-icon-button-danger"
+                        type="button"
+                        onClick={() => onRequestRemoveProject(project)}
+                        aria-label={`Remove ${project.name} from recent projects`}
+                      >
+                        <Trash2 size={16} strokeWidth={2} />
+                      </button>
+                    </div>
+                  ) : null}
                   <button
                     className="home-card-button"
                     type="button"

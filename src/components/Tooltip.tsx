@@ -4,9 +4,9 @@ interface TooltipProps extends PropsWithChildren {
   content: ReactNode;
 }
 
-export function Tooltip({ children, content }: TooltipProps) {
+export function Tooltip({ children, content, className }: TooltipProps) {
   return (
-    <span className="tooltip">
+    <span className={className ? `tooltip ${className}` : "tooltip"}>
       {children}
       <span className="tooltip-bubble" role="tooltip">
         {content}
@@ -14,3 +14,4 @@ export function Tooltip({ children, content }: TooltipProps) {
     </span>
   );
 }
+

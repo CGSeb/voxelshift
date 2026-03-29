@@ -93,7 +93,7 @@ struct RecentProject {
     exists: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VoxelShiftState {
     #[serde(default)]
@@ -488,6 +488,10 @@ pub fn run() {
                 }
             }
 
+            if let Err(error) = refresh_managed_blender_extensions_internal(&app.handle()) {
+                eprintln!("Unable to refresh managed Blender extensions: {error}");
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -507,6 +511,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_launcher_state,
             get_recent_projects,
+            refresh_managed_blender_extensions,
+            remove_recent_project,
             get_blender_configs,
             save_blender_config,
             apply_blender_config,
@@ -540,6 +546,18 @@ fn get_launcher_state(app: AppHandle) -> Result<LauncherState, String> {
 fn get_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
     let state = build_launcher_state(&app)?;
     Ok(collect_recent_projects(&state.versions))
+}
+
+#[tauri::command]
+fn remove_recent_project(app: AppHandle, file_path: String) -> Result<Vec<RecentProject>, String> {
+    let state = build_launcher_state(&app)?;
+    remove_recent_project_entries(&state.versions, &file_path)?;
+    Ok(collect_recent_projects(&state.versions))
+}
+
+#[tauri::command]
+fn refresh_managed_blender_extensions(app: AppHandle) -> Result<usize, String> {
+    refresh_managed_blender_extensions_internal(&app)
 }
 
 #[tauri::command]
@@ -1315,7 +1333,7 @@ fn collect_recent_projects(versions: &[BlenderVersion]) -> Vec<RecentProject> {
                 exists: Path::new(trimmed_file_path).exists(),
             };
 
-            let key = trimmed_file_path.to_lowercase();
+            let key = normalize_recent_project_path_key(trimmed_file_path);
 
             match projects_by_path.get(&key) {
                 Some(existing) if existing.saved_at >= project.saved_at => {}
@@ -1337,9 +1355,54 @@ fn collect_recent_projects(versions: &[BlenderVersion]) -> Vec<RecentProject> {
     projects
 }
 
+fn normalize_recent_project_path_key(value: &str) -> String {
+    value.trim().replace('\\', "/").to_lowercase()
+}
+
 fn read_voxelshift_state(path: &Path) -> Option<VoxelShiftState> {
     let contents = fs::read_to_string(path).ok()?;
     serde_json::from_str::<VoxelShiftState>(&contents).ok()
+}
+
+fn write_voxelshift_state(path: &Path, state: &VoxelShiftState) -> Result<(), String> {
+    let contents = serde_json::to_string(state)
+        .map_err(|error| format!("Unable to serialize Voxel Shift state: {error}"))?;
+    fs::write(path, contents).map_err(|error| format!("Unable to save Voxel Shift state: {error}"))
+}
+
+fn remove_recent_project_entries(versions: &[BlenderVersion], file_path: &str) -> Result<(), String> {
+    let target_key = normalize_recent_project_path_key(file_path);
+    if target_key.is_empty() {
+        return Err("Please provide a recent project path.".to_string());
+    }
+
+    let mut removed_any = false;
+
+    for version in versions {
+        let extension_dir = PathBuf::from(&version.install_dir).join(BLENDER_EXTENSION_DIR);
+        let config_path = extension_dir.join(BLENDER_EXTENSION_STATE_FILE);
+        let Some(mut state) = read_voxelshift_state(&config_path) else {
+            continue;
+        };
+
+        let previous_len = state.blender_projects.len();
+        state.blender_projects.retain(|stored_path, _| {
+            normalize_recent_project_path_key(stored_path) != target_key
+        });
+
+        if state.blender_projects.len() == previous_len {
+            continue;
+        }
+
+        write_voxelshift_state(&config_path, &state)?;
+        removed_any = true;
+    }
+
+    if removed_any {
+        Ok(())
+    } else {
+        Err("That recent project is no longer in the launcher history.".to_string())
+    }
 }
 
 fn recent_project_thumbnail_path(extension_dir: &Path, project_name: &str) -> Option<String> {
@@ -2635,6 +2698,25 @@ fn install_voxel_shift_extension<R: tauri::Runtime>(
     app: &AppHandle<R>,
     blender_install_dir: &Path,
 ) -> Result<(), String> {
+    let resources = resolve_extension_resource_paths(app)?;
+    sync_voxel_shift_extension_resources(blender_install_dir, &resources)?;
+    enable_voxel_shift_extension(blender_install_dir)?;
+    Ok(())
+}
+
+fn resolve_extension_resource_paths<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<(&'static str, PathBuf)>, String> {
+    [BLENDER_EXTENSION_INIT_FILE, BLENDER_EXTENSION_MANIFEST_FILE]
+        .into_iter()
+        .map(|file_name| Ok((file_name, resolve_extension_resource_path(app, file_name)?)))
+        .collect()
+}
+
+fn sync_voxel_shift_extension_resources(
+    blender_install_dir: &Path,
+    resources: &[(&'static str, PathBuf)],
+) -> Result<bool, String> {
     let extension_dir = blender_install_dir.join(BLENDER_EXTENSION_DIR);
     fs::create_dir_all(&extension_dir).map_err(|error| {
         format!(
@@ -2643,21 +2725,87 @@ fn install_voxel_shift_extension<R: tauri::Runtime>(
         )
     })?;
 
-    for file_name in [BLENDER_EXTENSION_INIT_FILE, BLENDER_EXTENSION_MANIFEST_FILE] {
-        let source_path = resolve_extension_resource_path(app, file_name)?;
-        let destination_path = extension_dir.join(file_name);
+    let mut changed = false;
 
-        fs::copy(&source_path, &destination_path).map_err(|error| {
+    for (file_name, source_path) in resources {
+        let destination_path = extension_dir.join(file_name);
+        if extension_resource_matches(source_path, &destination_path)? {
+            continue;
+        }
+
+        fs::copy(source_path, &destination_path).map_err(|error| {
             format!(
                 "Unable to copy {} into {}: {error}",
-                path_to_string(&source_path),
+                path_to_string(source_path),
                 path_to_string(&destination_path)
             )
         })?;
+        changed = true;
     }
 
-    enable_voxel_shift_extension(blender_install_dir)?;
-    Ok(())
+    Ok(changed)
+}
+
+fn extension_resource_matches(source_path: &Path, destination_path: &Path) -> Result<bool, String> {
+    if !destination_path.exists() {
+        return Ok(false);
+    }
+
+    let source_contents = fs::read(source_path).map_err(|error| {
+        format!(
+            "Unable to read the Voxel Shift extension resource {}: {error}",
+            path_to_string(source_path)
+        )
+    })?;
+    let destination_contents = fs::read(destination_path).map_err(|error| {
+        format!(
+            "Unable to read the Voxel Shift extension file {}: {error}",
+            path_to_string(destination_path)
+        )
+    })?;
+
+    Ok(source_contents == destination_contents)
+}
+
+fn refresh_managed_blender_extensions_internal<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<usize, String> {
+    let stable_dir = stable_install_dir(app)?;
+    if !stable_dir.exists() {
+        return Ok(0);
+    }
+
+    let resources = resolve_extension_resource_paths(app)?;
+    let mut refreshed = 0;
+
+    for entry in fs::read_dir(&stable_dir)
+        .map_err(|error| format!("Unable to read the managed Blender install directory: {error}"))?
+    {
+        let install_dir = entry
+            .map_err(|error| format!("Unable to inspect a managed Blender install: {error}"))?
+            .path();
+
+        if !install_dir.is_dir() {
+            continue;
+        }
+
+        match sync_voxel_shift_extension_resources(&install_dir, &resources) {
+            Ok(true) => match enable_voxel_shift_extension(&install_dir) {
+                Ok(()) => refreshed += 1,
+                Err(error) => eprintln!(
+                    "Unable to enable the refreshed Voxel Shift extension in {}: {error}",
+                    path_to_string(&install_dir)
+                ),
+            },
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "Unable to refresh the Voxel Shift extension in {}: {error}",
+                path_to_string(&install_dir)
+            ),
+        }
+    }
+
+    Ok(refreshed)
 }
 
 fn enable_voxel_shift_extension(blender_install_dir: &Path) -> Result<(), String> {
@@ -2735,7 +2883,7 @@ fn release_folder_name(file_name: &str) -> String {
         .to_string()
 }
 
-fn voxelshift_documents_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn voxelshift_documents_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let documents_dir = app
         .path()
         .document_dir()
@@ -2744,11 +2892,11 @@ fn voxelshift_documents_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(documents_dir.join(VOXELSHIFT_DIR_NAME))
 }
 
-fn stable_install_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn stable_install_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(voxelshift_documents_dir(app)?.join(STABLE_INSTALL_DIR_NAME))
 }
 
-fn configs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn configs_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(voxelshift_documents_dir(app)?.join(CONFIGS_DIR_NAME))
 }
 
@@ -3767,6 +3915,129 @@ mod tests {
             true,
         )]);
         assert_eq!(limited_projects.len(), 12);
+    }
+
+    #[test]
+    fn removes_recent_projects_from_all_matching_states() {
+        let sandbox = TestDir::new("remove-recent-projects");
+        let install_one = sandbox.path().join("Blender 4.2");
+        let install_two = sandbox.path().join("Blender 4.3");
+        let extension_one = install_one.join(BLENDER_EXTENSION_DIR);
+        let extension_two = install_two.join(BLENDER_EXTENSION_DIR);
+        fs::create_dir_all(&extension_one).unwrap();
+        fs::create_dir_all(&extension_two).unwrap();
+
+        let missing_project = sandbox.path().join("missing.blend");
+        let other_project = sandbox.path().join("other.blend");
+        fs::write(&other_project, b"").unwrap();
+
+        fs::write(
+            extension_one.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({
+                "blenderProjects": {
+                    path_to_string(&missing_project): "2026-03-20 10:00:00",
+                    path_to_string(&other_project): "2026-03-19 09:00:00"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extension_two.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({
+                "blenderProjects": {
+                    path_to_string(&missing_project).replace('\\', "/"): "2026-03-21 11:00:00"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let versions = vec![
+            make_installed_version("version-42", "Blender 4.2", Some("4.2.3"), &install_one, true),
+            make_installed_version("version-43", "Blender 4.3", Some("4.3.0"), &install_two, true),
+        ];
+
+        remove_recent_project_entries(&versions, &path_to_string(&missing_project)).unwrap();
+
+        let state_one = read_voxelshift_state(&extension_one.join(BLENDER_EXTENSION_STATE_FILE)).unwrap();
+        let state_two = read_voxelshift_state(&extension_two.join(BLENDER_EXTENSION_STATE_FILE)).unwrap();
+
+        assert_eq!(state_one.blender_projects.len(), 1);
+        assert!(state_one.blender_projects.contains_key(&path_to_string(&other_project)));
+        assert!(state_two.blender_projects.is_empty());
+
+        let projects = collect_recent_projects(&versions);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].file_path, path_to_string(&other_project));
+    }
+
+    #[test]
+    fn rejects_removing_unknown_recent_project_paths() {
+        let sandbox = TestDir::new("remove-missing-recent-project");
+        let install_dir = sandbox.path().join("Blender 4.2");
+        let extension_dir = install_dir.join(BLENDER_EXTENSION_DIR);
+        fs::create_dir_all(&extension_dir).unwrap();
+        fs::write(
+            extension_dir.join(BLENDER_EXTENSION_STATE_FILE),
+            serde_json::json!({
+                "blenderProjects": {
+                    path_to_string(&sandbox.path().join("known.blend")): "2026-03-20 10:00:00"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let versions = vec![make_installed_version(
+            "version-42",
+            "Blender 4.2",
+            Some("4.2.3"),
+            &install_dir,
+            true,
+        )];
+
+        assert_eq!(
+            remove_recent_project_entries(&versions, &path_to_string(&sandbox.path().join("unknown.blend"))),
+            Err("That recent project is no longer in the launcher history.".to_string())
+        );
+    }
+
+    #[test]
+    fn syncs_voxel_shift_extension_resources_only_when_files_change() {
+        let sandbox = TestDir::new("sync-extension-resources");
+        let install_dir = sandbox.path().join("Blender 4.2");
+        let resource_dir = sandbox.path().join("resources");
+        fs::create_dir_all(&resource_dir).unwrap();
+
+        let init_path = resource_dir.join(BLENDER_EXTENSION_INIT_FILE);
+        let manifest_path = resource_dir.join(BLENDER_EXTENSION_MANIFEST_FILE);
+        fs::write(&init_path, "print('v1')").unwrap();
+        fs::write(&manifest_path, "manifest-v1").unwrap();
+
+        let resources = vec![
+            (BLENDER_EXTENSION_INIT_FILE, init_path.clone()),
+            (BLENDER_EXTENSION_MANIFEST_FILE, manifest_path.clone()),
+        ];
+
+        assert!(sync_voxel_shift_extension_resources(&install_dir, &resources).unwrap());
+        assert_eq!(
+            fs::read_to_string(install_dir.join(BLENDER_EXTENSION_DIR).join(BLENDER_EXTENSION_INIT_FILE)).unwrap(),
+            "print('v1')"
+        );
+        assert!(!sync_voxel_shift_extension_resources(&install_dir, &resources).unwrap());
+
+        fs::write(&manifest_path, "manifest-v2").unwrap();
+        assert!(sync_voxel_shift_extension_resources(&install_dir, &resources).unwrap());
+        assert_eq!(
+            fs::read_to_string(
+                install_dir
+                    .join(BLENDER_EXTENSION_DIR)
+                    .join(BLENDER_EXTENSION_MANIFEST_FILE)
+            )
+            .unwrap(),
+            "manifest-v2"
+        );
     }
 
     #[test]
@@ -4850,8 +5121,6 @@ mod tests {
     }
 
 }
-
-
 
 
 

@@ -25,12 +25,14 @@ const apiMocks = vi.hoisted(() => ({
   getBlenderReleaseDownloads: vi.fn(),
   getLauncherState: vi.fn(),
   getRecentProjects: vi.fn(),
+  refreshManagedBlenderExtensions: vi.fn(),
   getRunningBlenderLogs: vi.fn(),
   getRunningBlenders: vi.fn(),
   installBlenderRelease: vi.fn(),
   launchBlender: vi.fn(),
   launchBlenderProject: vi.fn(),
   removeBlenderConfig: vi.fn(),
+  removeRecentProject: vi.fn(),
   removeBlenderVersion: vi.fn(),
   saveBlenderConfig: vi.fn(),
   stopRunningBlender: vi.fn(),
@@ -191,6 +193,7 @@ describe("App", () => {
     updaterMocks.checkForAppUpdate.mockResolvedValue(null);
     apiMocks.getLauncherState.mockResolvedValue(launcherState);
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
+    apiMocks.refreshManagedBlenderExtensions.mockResolvedValue(1);
     apiMocks.getRunningBlenders.mockResolvedValue([]);
     apiMocks.getRunningBlenderLogs.mockResolvedValue([runningBlenderLog]);
     apiMocks.getBlenderReleaseDownloads.mockResolvedValue(releaseListing);
@@ -203,6 +206,7 @@ describe("App", () => {
     apiMocks.cancelBlenderReleaseInstall.mockResolvedValue(undefined);
     apiMocks.launchBlender.mockResolvedValue(launcherState);
     apiMocks.launchBlenderProject.mockResolvedValue(launcherState);
+    apiMocks.removeRecentProject.mockResolvedValue([]);
     apiMocks.removeBlenderVersion.mockResolvedValue({ ...launcherState, versions: [] });
   });
 
@@ -252,6 +256,7 @@ describe("App", () => {
 
     await screen.findByText("Voxel Shift 1.1.0 installed");
     expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(apiMocks.refreshManagedBlenderExtensions).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Installed")).toBeInTheDocument();
   });
 
@@ -446,6 +451,7 @@ describe("App", () => {
 
     await screen.findByText("Voxel Shift 1.1.0 installed");
     expect(downloadAndInstall).toHaveBeenCalledTimes(2);
+    expect(apiMocks.refreshManagedBlenderExtensions).toHaveBeenCalledTimes(1);
   });
 
   it("cancels release installs and removes installed versions through the confirm dialog", async () => {
@@ -812,6 +818,28 @@ describe("App", () => {
     });
   });
 
+  it("removes missing recent projects through a confirm dialog", async () => {
+    apiMocks.getRecentProjects.mockResolvedValueOnce([{ ...recentProject, exists: false }]).mockResolvedValue([]);
+
+    render(<App />);
+
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Remove Test Scene from recent projects" }));
+
+    const removeDialog = await screen.findByRole("alertdialog");
+    expect(within(removeDialog).getByText("Remove Test Scene from recent projects?")).toBeInTheDocument();
+
+    fireEvent.click(within(removeDialog).getByRole("button", { name: "Remove recent project" }));
+
+    await waitFor(() => {
+      expect(apiMocks.removeRecentProject).toHaveBeenCalledWith(recentProject.filePath);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Test Scene")).not.toBeInTheDocument();
+    });
+  });
+
   it("surfaces config loading, saving, applying, and removing errors", async () => {
     apiMocks.getBlenderConfigs.mockRejectedValueOnce(new Error("Config list failed"));
     apiMocks.saveBlenderConfig.mockRejectedValueOnce(new Error("Save failed"));
@@ -859,9 +887,6 @@ describe("App", () => {
     });
   });
 });
-
-
-
 
 
 

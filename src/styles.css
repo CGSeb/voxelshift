@@ -825,6 +825,10 @@ p {
   align-items: center;
 }
 
+.tooltip-active-layer {
+  z-index: 80;
+}
+
 .tooltip-bubble {
   position: absolute;
   z-index: 60;
@@ -1238,6 +1242,13 @@ p {
   gap: 8px;
 }
 
+.home-card-actions-overlay {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
+}
+
 .home-card-eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.16em;
@@ -1268,6 +1279,45 @@ p {
 .home-card-status-missing {
   background: rgba(255, 117, 117, 0.14);
   color: #ffbcbc;
+}
+
+.home-card-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(15, 20, 24, 0.72);
+  color: var(--text-strong);
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.home-card-icon-button:hover,
+.home-card-icon-button:focus-visible {
+  transform: translateY(-1px);
+}
+
+.home-card-icon-button:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.48);
+  outline-offset: 2px;
+}
+
+.home-card-icon-button-danger {
+  border-color: rgba(255, 141, 141, 0.24);
+  color: #ffd1d1;
+}
+
+.home-card-icon-button-danger:hover,
+.home-card-icon-button-danger:focus-visible {
+  background: rgba(110, 28, 28, 0.82);
+  border-color: rgba(255, 141, 141, 0.42);
+  color: #fff1f1;
 }
 
 .home-card-title {
@@ -2160,3 +2210,5 @@ p {
     gap: 4px;
   }
 }
+
+

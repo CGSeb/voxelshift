@@ -97,6 +97,7 @@ describe("ReleaseRow", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Manage configs for Blender 4.2.3" }));
     expect(screen.getByRole("menuitem", { name: "Save config" })).toBeInTheDocument();
+    expect(screen.getByText("4.2.3").closest("article")).toHaveClass("release-row-item-config-open");
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("menuitem", { name: "Save config" })).not.toBeInTheDocument();
@@ -195,3 +196,4 @@ describe("ReleaseRow", () => {
     expect(screen.getByText("Nightly")).toHaveClass("release-channel-chip");
   });
 });
+

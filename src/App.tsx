@@ -16,12 +16,14 @@ import {
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
+  refreshManagedBlenderExtensions,
   getRunningBlenderLogs,
   getRunningBlenders,
   installBlenderRelease,
   launchBlender,
   launchBlenderProject,
   removeBlenderConfig,
+  removeRecentProject,
   removeBlenderVersion,
   saveBlenderConfig,
   stopRunningBlender,
@@ -285,6 +287,9 @@ export default function App() {
   const [isLoadingHome, setIsLoadingHome] = useState(false);
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
+  const [pendingRemoveRecentProject, setPendingRemoveRecentProject] = useState<RecentProject | null>(null);
+  const [isRemovingRecentProject, setIsRemovingRecentProject] = useState(false);
+  const [removeRecentProjectError, setRemoveRecentProjectError] = useState<string | null>(null);
   const [favoriteReleaseValues, setFavoriteReleaseValues] = useState<string[]>(() => readFavoriteReleaseValues());
   const [pendingUninstallDownload, setPendingUninstallDownload] = useState<BlenderReleaseDownload | null>(null);
   const [isRemovingVersion, setIsRemovingVersion] = useState(false);
@@ -805,6 +810,40 @@ export default function App() {
     }
   }
 
+  function openRemoveRecentProjectDialog(project: RecentProject) {
+    setPendingRemoveRecentProject(project);
+    setRemoveRecentProjectError(null);
+  }
+
+  function closeRemoveRecentProjectDialog() {
+    if (isRemovingRecentProject) {
+      return;
+    }
+
+    setPendingRemoveRecentProject(null);
+    setRemoveRecentProjectError(null);
+  }
+
+  async function confirmRemoveRecentProject() {
+    if (!pendingRemoveRecentProject) {
+      return;
+    }
+
+    setIsRemovingRecentProject(true);
+    setRemoveRecentProjectError(null);
+
+    try {
+      const nextRecentProjects = await removeRecentProject(pendingRemoveRecentProject.filePath);
+      setRecentProjects(nextRecentProjects);
+      setPendingRemoveRecentProject(null);
+      setHomeError(null);
+    } catch (error) {
+      setRemoveRecentProjectError(readErrorMessage(error, `Could not remove ${pendingRemoveRecentProject.name}.`));
+    } finally {
+      setIsRemovingRecentProject(false);
+    }
+  }
+
   async function openRunningBlenderLogs(process: BlenderSession) {
     setActiveLogsProcessId(process.instanceId);
 
@@ -1074,6 +1113,8 @@ export default function App() {
         setAppUpdatePhase("installing");
       });
 
+      await refreshManagedBlenderExtensions();
+
       setAppUpdatePhase("completed");
       setAppUpdateError(null);
       setAppUpdateProgressPercent(100);
@@ -1278,6 +1319,7 @@ export default function App() {
             errorMessage={homeError}
             onBrowseReleases={() => setActivePage("releases")}
             onOpenProject={(project) => void openRecentProject(project)}
+            onRequestRemoveProject={openRemoveRecentProjectDialog}
             onLaunchVersion={(version) => void launchInstalledRelease(version)}
           />
         ) : (
@@ -1378,6 +1420,28 @@ export default function App() {
         isConfirming={stoppingBlenderId !== null}
         onConfirm={confirmStopRunningBlender}
         onCancel={closeStopBlenderDialog}
+      />
+
+      <ConfirmDialog
+        open={pendingRemoveRecentProject !== null}
+        title={pendingRemoveRecentProject ? `Remove ${pendingRemoveRecentProject.name} from recent projects?` : "Remove recent project?"}
+        description={
+          pendingRemoveRecentProject ? (
+            <>
+              <p>This removes the missing project shortcut from your recent projects list.</p>
+              <p>No files will be deleted from disk.</p>
+            </>
+          ) : (
+            "This removes the selected recent project shortcut."
+          )
+        }
+        errorMessage={removeRecentProjectError}
+        confirmLabel="Remove recent project"
+        confirmingLabel="Removing..."
+        cancelLabel="Keep it"
+        isConfirming={isRemovingRecentProject}
+        onConfirm={confirmRemoveRecentProject}
+        onCancel={closeRemoveRecentProjectDialog}
       />
 
       <ConfirmDialog

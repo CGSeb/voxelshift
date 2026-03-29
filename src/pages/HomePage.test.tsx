@@ -58,6 +58,7 @@ describe("HomePage", () => {
         errorMessage="Could not load your workspace"
         onBrowseReleases={onBrowseReleases}
         onOpenProject={vi.fn()}
+        onRequestRemoveProject={vi.fn()}
         onLaunchVersion={vi.fn()}
       />,
     );
@@ -69,6 +70,7 @@ describe("HomePage", () => {
 
   it("renders project and favorite carousels, thumbnail fallbacks, and launch actions", () => {
     const onOpenProject = vi.fn();
+    const onRequestRemoveProject = vi.fn();
     const onLaunchVersion = vi.fn();
     const recentProjects = [
       makeProject(1),
@@ -94,6 +96,7 @@ describe("HomePage", () => {
         errorMessage={null}
         onBrowseReleases={vi.fn()}
         onOpenProject={onOpenProject}
+        onRequestRemoveProject={onRequestRemoveProject}
         onLaunchVersion={onLaunchVersion}
       />,
     );
@@ -106,6 +109,9 @@ describe("HomePage", () => {
     const missingProjectButton = screen.getByRole("button", { name: "Project 2 is unavailable" });
     expect(missingProjectButton).toBeDisabled();
     expect(screen.getByText("Missing")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Remove Project 2 from recent projects" }));
+    expect(onRequestRemoveProject).toHaveBeenCalledWith(expect.objectContaining({ id: "project-2" }));
+    expect(screen.queryByRole("button", { name: "Remove Project 1 from recent projects" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Open Project 3" }));
     expect(onOpenProject).toHaveBeenCalledWith(expect.objectContaining({ id: "project-3" }));
@@ -145,6 +151,7 @@ describe("HomePage", () => {
         errorMessage={null}
         onBrowseReleases={vi.fn()}
         onOpenProject={vi.fn()}
+        onRequestRemoveProject={vi.fn()}
         onLaunchVersion={vi.fn()}
       />,
     );

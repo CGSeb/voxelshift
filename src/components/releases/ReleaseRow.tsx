@@ -135,8 +135,10 @@ export function ReleaseRow({
     onOpenConfigs(installedVersion, mode);
   }
 
+  const rowClassName = isConfigMenuOpen ? "release-row release-row-item release-row-item-config-open" : "release-row release-row-item";
+
   return (
-    <article className="release-row release-row-item">
+    <article className={rowClassName}>
       <div className="release-version-cell release-primary">
         <div className="release-version-meta">
           <strong>{download.version}</strong>
@@ -164,7 +166,10 @@ export function ReleaseRow({
               </button>
             </Tooltip>
 
-            <Tooltip content={`Manage configs for Blender ${download.version}`}>
+            <Tooltip
+              content={`Manage configs for Blender ${download.version}`}
+              className={isConfigMenuOpen ? "tooltip-active-layer" : undefined}
+            >
               <div className="release-config-menu-shell" ref={configMenuRef}>
                 <button
                   className="release-config-button"
@@ -271,3 +276,6 @@ export function ReleaseRow({
     </article>
   );
 }
+
+
+
