@@ -65,7 +65,7 @@ describe("updater helpers", () => {
     const update = new AppUpdate({
       rid: 21,
       currentVersion: "1.0.0",
-      version: "1.2.0",
+      version: "1.2.1",
       rawJson: {},
     });
     const onEvent = vi.fn();

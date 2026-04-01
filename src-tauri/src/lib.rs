@@ -1,4 +1,4 @@
-﻿use futures_util::StreamExt;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
@@ -25,6 +25,7 @@ mod planner;
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
+const MINIMIZED_WINDOW_SENTINEL: i32 = -32000;
 #[cfg(target_os = "windows")]
 const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
 #[cfg(target_os = "linux")]
@@ -164,14 +165,14 @@ struct StoredWindowState {
     is_maximized: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct StoredWindowPosition {
     x: i32,
     y: i32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct StoredWindowSize {
     width: u32,
@@ -496,7 +497,10 @@ pub fn run() {
                 eprintln!("Unable to refresh managed Blender extensions: {error}");
             }
 
-            if let Err(error) = planner::initialize(&app.handle(), app.state::<planner::PlannerRegistry>().inner()) {
+            if let Err(error) = planner::initialize(
+                &app.handle(),
+                app.state::<planner::PlannerRegistry>().inner(),
+            ) {
                 eprintln!("Unable to initialize planner state: {error}");
             }
 
@@ -620,7 +624,8 @@ fn resolve_planner_run_request(
     request: planner::CreatePlannerRunRequest,
 ) -> Result<planner::ResolvedPlannerRunRequest, String> {
     let blend_file_path = planner::validate_blend_file_path(&request.blend_file_path)?;
-    let (start_frame, end_frame) = planner::validate_frame_range(request.start_frame, request.end_frame)?;
+    let (start_frame, end_frame) =
+        planner::validate_frame_range(request.start_frame, request.end_frame)?;
     let output_folder_path = request
         .output_folder_path
         .as_deref()
@@ -1175,8 +1180,20 @@ fn launch_managed_blender_process(
     })?;
 
     emit_running_blenders_changed(app, &running_blenders);
-    spawn_blender_log_reader(app.clone(), running_blenders.clone(), instance_id.clone(), "stdout", stdout);
-    spawn_blender_log_reader(app.clone(), running_blenders.clone(), instance_id.clone(), "stderr", stderr);
+    spawn_blender_log_reader(
+        app.clone(),
+        running_blenders.clone(),
+        instance_id.clone(),
+        "stdout",
+        stdout,
+    );
+    spawn_blender_log_reader(
+        app.clone(),
+        running_blenders.clone(),
+        instance_id.clone(),
+        "stderr",
+        stderr,
+    );
     spawn_blender_process_monitor(app.clone(), running_blenders, instance_id, child);
     Ok(())
 }
@@ -1494,7 +1511,10 @@ fn write_voxelshift_state(path: &Path, state: &VoxelShiftState) -> Result<(), St
     fs::write(path, contents).map_err(|error| format!("Unable to save Voxel Shift state: {error}"))
 }
 
-fn remove_recent_project_entries(versions: &[BlenderVersion], file_path: &str) -> Result<(), String> {
+fn remove_recent_project_entries(
+    versions: &[BlenderVersion],
+    file_path: &str,
+) -> Result<(), String> {
     let target_key = normalize_recent_project_path_key(file_path);
     if target_key.is_empty() {
         return Err("Please provide a recent project path.".to_string());
@@ -1510,9 +1530,9 @@ fn remove_recent_project_entries(versions: &[BlenderVersion], file_path: &str) -
         };
 
         let previous_len = state.blender_projects.len();
-        state.blender_projects.retain(|stored_path, _| {
-            normalize_recent_project_path_key(stored_path) != target_key
-        });
+        state
+            .blender_projects
+            .retain(|stored_path, _| normalize_recent_project_path_key(stored_path) != target_key);
 
         if state.blender_projects.len() == previous_len {
             continue;
@@ -2973,7 +2993,10 @@ fn enable_voxel_shift_extension(blender_install_dir: &Path) -> Result<(), String
     ))
 }
 
-fn resolve_extension_resource_path<R: tauri::Runtime>(app: &AppHandle<R>, file_name: &str) -> Result<PathBuf, String> {
+fn resolve_extension_resource_path<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    file_name: &str,
+) -> Result<PathBuf, String> {
     for bundled_relative_path in bundled_extension_resource_candidates(file_name) {
         let bundled_path = app
             .path()
@@ -3361,6 +3384,13 @@ fn save_window_state(app: &AppHandle, state: &StoredWindowState) -> Result<(), S
 }
 
 fn save_window_state_for(window: &Window) -> Result<(), String> {
+    if window
+        .is_minimized()
+        .map_err(|error| format!("Unable to read window minimized state: {error}"))?
+    {
+        return Ok(());
+    }
+
     let app = window.app_handle();
     let mut state = load_window_state(&app)?.unwrap_or_default();
 
@@ -3400,12 +3430,18 @@ fn restore_window_state(window: &WebviewWindow) -> Result<(), String> {
             .map_err(|error| format!("Unable to restore window size: {error}"))?;
     }
 
-    if let Some(position) = state.position {
+    let had_saved_position = state.position.is_some();
+
+    if let Some(position) = restorable_window_position(state.position) {
         window
             .set_position(Position::Physical(PhysicalPosition::new(
                 position.x, position.y,
             )))
             .map_err(|error| format!("Unable to restore window position: {error}"))?;
+    } else if had_saved_position {
+        window
+            .center()
+            .map_err(|error| format!("Unable to center restored window: {error}"))?;
     }
 
     if state.is_maximized {
@@ -3415,6 +3451,18 @@ fn restore_window_state(window: &WebviewWindow) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn restorable_window_position(
+    position: Option<StoredWindowPosition>,
+) -> Option<StoredWindowPosition> {
+    let position = position?;
+
+    if position.x == MINIMIZED_WINDOW_SENTINEL && position.y == MINIMIZED_WINDOW_SENTINEL {
+        None
+    } else {
+        Some(position)
+    }
 }
 
 fn window_state_file_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -4092,17 +4140,33 @@ mod tests {
         .unwrap();
 
         let versions = vec![
-            make_installed_version("version-42", "Blender 4.2", Some("4.2.3"), &install_one, true),
-            make_installed_version("version-43", "Blender 4.3", Some("4.3.0"), &install_two, true),
+            make_installed_version(
+                "version-42",
+                "Blender 4.2",
+                Some("4.2.3"),
+                &install_one,
+                true,
+            ),
+            make_installed_version(
+                "version-43",
+                "Blender 4.3",
+                Some("4.3.0"),
+                &install_two,
+                true,
+            ),
         ];
 
         remove_recent_project_entries(&versions, &path_to_string(&missing_project)).unwrap();
 
-        let state_one = read_voxelshift_state(&extension_one.join(BLENDER_EXTENSION_STATE_FILE)).unwrap();
-        let state_two = read_voxelshift_state(&extension_two.join(BLENDER_EXTENSION_STATE_FILE)).unwrap();
+        let state_one =
+            read_voxelshift_state(&extension_one.join(BLENDER_EXTENSION_STATE_FILE)).unwrap();
+        let state_two =
+            read_voxelshift_state(&extension_two.join(BLENDER_EXTENSION_STATE_FILE)).unwrap();
 
         assert_eq!(state_one.blender_projects.len(), 1);
-        assert!(state_one.blender_projects.contains_key(&path_to_string(&other_project)));
+        assert!(state_one
+            .blender_projects
+            .contains_key(&path_to_string(&other_project)));
         assert!(state_two.blender_projects.is_empty());
 
         let projects = collect_recent_projects(&versions);
@@ -4136,7 +4200,10 @@ mod tests {
         )];
 
         assert_eq!(
-            remove_recent_project_entries(&versions, &path_to_string(&sandbox.path().join("unknown.blend"))),
+            remove_recent_project_entries(
+                &versions,
+                &path_to_string(&sandbox.path().join("unknown.blend"))
+            ),
             Err("That recent project is no longer in the launcher history.".to_string())
         );
     }
@@ -4160,7 +4227,12 @@ mod tests {
 
         assert!(sync_voxel_shift_extension_resources(&install_dir, &resources).unwrap());
         assert_eq!(
-            fs::read_to_string(install_dir.join(BLENDER_EXTENSION_DIR).join(BLENDER_EXTENSION_INIT_FILE)).unwrap(),
+            fs::read_to_string(
+                install_dir
+                    .join(BLENDER_EXTENSION_DIR)
+                    .join(BLENDER_EXTENSION_INIT_FILE)
+            )
+            .unwrap(),
             "print('v1')"
         );
         assert!(!sync_voxel_shift_extension_resources(&install_dir, &resources).unwrap());
@@ -4915,14 +4987,16 @@ mod tests {
         assert_eq!(instance_ids, vec!["same-time", "newer", "older"]);
 
         assert_eq!(registry.set_stopping("older", true).unwrap(), true);
-        assert!(registry
-            .get("older")
-            .unwrap()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .info
-            .is_stopping);
+        assert!(
+            registry
+                .get("older")
+                .unwrap()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .info
+                .is_stopping
+        );
         assert_eq!(registry.set_stopping("missing", true).unwrap(), false);
 
         assert_eq!(registry.remove("older").unwrap(), true);
@@ -4990,6 +5064,22 @@ mod tests {
             logs.last().unwrap().message,
             format!("line {}", MAX_RUNNING_BLENDER_LOG_LINES + 1)
         );
+    }
+
+    #[test]
+    fn restorable_window_position_skips_minimized_window_sentinel() {
+        assert_eq!(
+            restorable_window_position(Some(StoredWindowPosition { x: 140, y: 80 })),
+            Some(StoredWindowPosition { x: 140, y: 80 })
+        );
+        assert_eq!(
+            restorable_window_position(Some(StoredWindowPosition {
+                x: MINIMIZED_WINDOW_SENTINEL,
+                y: MINIMIZED_WINDOW_SENTINEL,
+            })),
+            None
+        );
+        assert_eq!(restorable_window_position(None), None);
     }
 
     #[test]
@@ -5102,7 +5192,9 @@ mod tests {
             }
         }
 
-        archive.finish().expect("zip archive should finalize cleanly");
+        archive
+            .finish()
+            .expect("zip archive should finalize cleanly");
     }
 
     #[test]
@@ -5126,7 +5218,8 @@ mod tests {
         let app = TestProgressEmitter::default();
         let request_body = b"downloaded-blender-archive";
         let (url, server) = start_test_http_server("200 OK", request_body);
-        let request = make_install_request("download-success", "blender-4.2.3-windows-x64.zip", &url);
+        let request =
+            make_install_request("download-success", "blender-4.2.3-windows-x64.zip", &url);
         let control = ReleaseInstallControl::default();
         let sandbox = TestDir::new("download-release-archive");
         let archive_path = sandbox.path().join("download.zip");
@@ -5186,7 +5279,10 @@ mod tests {
         .expect("zip extraction helper should install the release into the stable directory");
 
         assert_eq!(final_dir, stable_dir.join("blender-4.2.3-windows-x64"));
-        assert_eq!(fs::read(final_dir.join(BLENDER_EXECUTABLE_NAME)).unwrap(), b"binary");
+        assert_eq!(
+            fs::read(final_dir.join(BLENDER_EXECUTABLE_NAME)).unwrap(),
+            b"binary"
+        );
         assert_eq!(
             fs::read(final_dir.join("scripts").join("startup").join("theme.py")).unwrap(),
             b"theme"
@@ -5268,12 +5364,4 @@ mod tests {
             "Linux tar.xz release extraction is only supported on Linux builds."
         );
     }
-
 }
-
-
-
-
-
-
-
