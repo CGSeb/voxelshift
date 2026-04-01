@@ -2,6 +2,7 @@ import type { PropsWithChildren, ReactNode } from "react";
 
 interface TooltipProps extends PropsWithChildren {
   content: ReactNode;
+  className?: string;
 }
 
 export function Tooltip({ children, content, className }: TooltipProps) {

@@ -119,6 +119,7 @@ export interface PlannerRunSummary {
   startFrame: number;
   endFrame: number;
   startAt: number;
+  outputFolderPath?: string | null;
   createdAt: number;
   startedAt: number | null;
   completedAt: number | null;
