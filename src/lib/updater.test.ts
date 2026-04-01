@@ -80,4 +80,23 @@ describe("updater helpers", () => {
     payload.onEvent.onmessage?.({ event: "Progress", data: { chunkLength: 64 } });
     expect(onEvent).toHaveBeenCalledWith({ event: "Progress", data: { chunkLength: 64 } });
   });
+
+  it("downloads and installs updates without wiring a progress callback", async () => {
+    coreMocks.invoke.mockResolvedValue(undefined);
+
+    const update = new AppUpdate({
+      rid: 34,
+      currentVersion: "1.0.0",
+      version: "1.3.0",
+      rawJson: {},
+    });
+
+    await update.downloadAndInstall();
+
+    const [command, payload] = coreMocks.invoke.mock.calls[0];
+    expect(command).toBe("plugin:updater|download_and_install");
+    expect(payload.rid).toBe(34);
+    expect(payload.onEvent).toBeInstanceOf(coreMocks.Channel);
+    expect(payload.onEvent.onmessage).toBeUndefined();
+  });
 });

@@ -44,6 +44,7 @@ const BLENDER_EXTENSION_INIT_FILE: &str = "__init__.py";
 const BLENDER_EXTENSION_MANIFEST_FILE: &str = "blender_manifest.toml";
 const BLENDER_EXTENSION_STATE_FILE: &str = "VoxelShift.json";
 const BLENDER_EXTENSION_MODULE: &str = "bl_ext.user_default.voxel_shift";
+const BUNDLED_EXTENSION_RESOURCE_DIR: &str = "resources";
 const BLENDER_EXTENSION_ENABLE_SCRIPT: &str =
     "import bpy;bpy.ops.preferences.addon_enable(module='bl_ext.user_default.voxel_shift');bpy.ops.wm.save_userpref();";
 const DOWNLOAD_PROGRESS_WEIGHT: f64 = 95.0;
@@ -2973,13 +2974,20 @@ fn enable_voxel_shift_extension(blender_install_dir: &Path) -> Result<(), String
 }
 
 fn resolve_extension_resource_path<R: tauri::Runtime>(app: &AppHandle<R>, file_name: &str) -> Result<PathBuf, String> {
-    let bundled_path = app
-        .path()
-        .resolve(file_name, BaseDirectory::Resource)
-        .map_err(|error| format!("Unable to locate bundled resource {file_name}: {error}"))?;
+    for bundled_relative_path in bundled_extension_resource_candidates(file_name) {
+        let bundled_path = app
+            .path()
+            .resolve(&bundled_relative_path, BaseDirectory::Resource)
+            .map_err(|error| {
+                format!(
+                    "Unable to locate bundled resource {}: {error}",
+                    bundled_relative_path.display()
+                )
+            })?;
 
-    if bundled_path.exists() {
-        return Ok(bundled_path);
+        if bundled_path.exists() {
+            return Ok(bundled_path);
+        }
     }
 
     let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2995,6 +3003,13 @@ fn resolve_extension_resource_path<R: tauri::Runtime>(app: &AppHandle<R>, file_n
         "Unable to find the Voxel Shift extension resource {}.",
         file_name
     ))
+}
+
+fn bundled_extension_resource_candidates(file_name: &str) -> [PathBuf; 2] {
+    [
+        PathBuf::from(BUNDLED_EXTENSION_RESOURCE_DIR).join(file_name),
+        PathBuf::from(file_name),
+    ]
 }
 
 fn release_folder_name(file_name: &str) -> String {
@@ -4161,6 +4176,17 @@ mod tests {
             .unwrap(),
             "manifest-v2"
         );
+    }
+
+    #[test]
+    fn bundled_extension_resource_candidates_check_nested_bundle_path_first() {
+        let candidates = bundled_extension_resource_candidates(BLENDER_EXTENSION_INIT_FILE);
+
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(BUNDLED_EXTENSION_RESOURCE_DIR).join(BLENDER_EXTENSION_INIT_FILE)
+        );
+        assert_eq!(candidates[1], PathBuf::from(BLENDER_EXTENSION_INIT_FILE));
     }
 
     #[test]
