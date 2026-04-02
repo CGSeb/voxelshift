@@ -3028,8 +3028,11 @@ fn resolve_extension_resource_path<R: tauri::Runtime>(
     ))
 }
 
-fn bundled_extension_resource_candidates(file_name: &str) -> [PathBuf; 2] {
+fn bundled_extension_resource_candidates(file_name: &str) -> [PathBuf; 3] {
     [
+        PathBuf::from("_up_")
+            .join(BUNDLED_EXTENSION_RESOURCE_DIR)
+            .join(file_name),
         PathBuf::from(BUNDLED_EXTENSION_RESOURCE_DIR).join(file_name),
         PathBuf::from(file_name),
     ]
@@ -4251,14 +4254,20 @@ mod tests {
     }
 
     #[test]
-    fn bundled_extension_resource_candidates_check_nested_bundle_path_first() {
+    fn bundled_extension_resource_candidates_include_updater_layout_first() {
         let candidates = bundled_extension_resource_candidates(BLENDER_EXTENSION_INIT_FILE);
 
         assert_eq!(
             candidates[0],
+            PathBuf::from("_up_")
+                .join(BUNDLED_EXTENSION_RESOURCE_DIR)
+                .join(BLENDER_EXTENSION_INIT_FILE)
+        );
+        assert_eq!(
+            candidates[1],
             PathBuf::from(BUNDLED_EXTENSION_RESOURCE_DIR).join(BLENDER_EXTENSION_INIT_FILE)
         );
-        assert_eq!(candidates[1], PathBuf::from(BLENDER_EXTENSION_INIT_FILE));
+        assert_eq!(candidates[2], PathBuf::from(BLENDER_EXTENSION_INIT_FILE));
     }
 
     #[test]
