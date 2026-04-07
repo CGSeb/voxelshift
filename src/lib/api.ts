@@ -48,6 +48,7 @@ export interface CreatePlannerRunPayload {
   endFrame: number;
   startAt: number;
   outputFolderPath?: string | null;
+  shutdownWhenDone: boolean;
   blender: {
     source: "library" | "custom";
     versionId?: string | null;

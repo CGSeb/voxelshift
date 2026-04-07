@@ -9,6 +9,7 @@ const runningRun: PlannerRunSummary = {
   startFrame: 1,
   endFrame: 120,
   startAt: 1_775_688_000,
+  shutdownWhenDone: false,
   createdAt: 1_775_684_400,
   startedAt: 1_775_688_000,
   completedAt: null,

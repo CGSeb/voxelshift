@@ -665,6 +665,7 @@ fn resolve_planner_run_request(
         end_frame,
         start_at: request.start_at,
         output_folder_path,
+        shutdown_when_done: request.shutdown_when_done,
         blender_target,
     })
 }

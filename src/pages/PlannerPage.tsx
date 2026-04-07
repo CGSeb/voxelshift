@@ -171,6 +171,31 @@ function getRunProgressLabel(run: PlannerRunSummary) {
   return null;
 }
 
+function resetPlannerFormState(setters: {
+  setBlendFilePath: (value: string) => void;
+  setStartFrame: (value: string) => void;
+  setEndFrame: (value: string) => void;
+  setStartTime: (value: string) => void;
+  setStartTimePickerMonth: (value: Date) => void;
+  setBlenderSource: (value: "library" | "custom") => void;
+  setCustomExecutablePath: (value: string) => void;
+  setOverrideOutputFolder: (value: boolean) => void;
+  setOutputFolderPath: (value: string) => void;
+  setShutdownWhenDone: (value: boolean) => void;
+}) {
+  const nextStartTime = createDefaultStartTime();
+  setters.setBlendFilePath("");
+  setters.setStartFrame("1");
+  setters.setEndFrame("250");
+  setters.setStartTime(nextStartTime);
+  setters.setStartTimePickerMonth(createMonthStart(parseDateTimeValue(nextStartTime) ?? new Date()));
+  setters.setBlenderSource("library");
+  setters.setCustomExecutablePath("");
+  setters.setOverrideOutputFolder(false);
+  setters.setOutputFolderPath("");
+  setters.setShutdownWhenDone(false);
+}
+
 export function PlannerPage({
   blenderVersions,
   plannerRuns,
@@ -196,6 +221,7 @@ export function PlannerPage({
   const [customExecutablePath, setCustomExecutablePath] = useState("");
   const [overrideOutputFolder, setOverrideOutputFolder] = useState(false);
   const [outputFolderPath, setOutputFolderPath] = useState("");
+  const [shutdownWhenDone, setShutdownWhenDone] = useState(false);
   const [localErrorMessage, setLocalErrorMessage] = useState<string | null>(null);
   const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
@@ -283,7 +309,18 @@ export function PlannerPage({
     if (run) {
       populateFormFromRun(run);
     } else {
-      setStartTimePickerMonth(createMonthStart(selectedStartDate));
+      resetPlannerFormState({
+        setBlendFilePath,
+        setStartFrame,
+        setEndFrame,
+        setStartTime,
+        setStartTimePickerMonth,
+        setBlenderSource,
+        setCustomExecutablePath,
+        setOverrideOutputFolder,
+        setOutputFolderPath,
+        setShutdownWhenDone,
+      });
     }
     setIsScheduleModalOpen(true);
   }
@@ -329,6 +366,7 @@ export function PlannerPage({
     setCustomExecutablePath(run.blenderTarget.source === "custom" ? run.blenderTarget.executablePath : "");
     setOverrideOutputFolder(Boolean(run.outputFolderPath));
     setOutputFolderPath(run.outputFolderPath ?? "");
+    setShutdownWhenDone(run.shutdownWhenDone);
   }
 
   function updateStartDate(nextDate: Date) {
@@ -407,6 +445,7 @@ export function PlannerPage({
       endFrame: parsedEndFrame,
       startAt,
       outputFolderPath: overrideOutputFolder ? outputFolderPath.trim() : null,
+      shutdownWhenDone,
       blender: {
         source: blenderSource,
         versionId: blenderSource === "library" ? libraryVersionId : null,
@@ -417,16 +456,18 @@ export function PlannerPage({
     const saved = editingRunId ? await onUpdateRun(editingRunId, payload) : await onCreateRun(payload);
 
     if (saved) {
-      const nextStartTime = createDefaultStartTime();
-      setBlendFilePath("");
-      setStartFrame("1");
-      setEndFrame("250");
-      setStartTime(nextStartTime);
-      setStartTimePickerMonth(createMonthStart(parseDateTimeValue(nextStartTime) ?? new Date()));
-      setCustomExecutablePath("");
-      setOverrideOutputFolder(false);
-      setOutputFolderPath("");
-      setBlenderSource("library");
+      resetPlannerFormState({
+        setBlendFilePath,
+        setStartFrame,
+        setEndFrame,
+        setStartTime,
+        setStartTimePickerMonth,
+        setBlenderSource,
+        setCustomExecutablePath,
+        setOverrideOutputFolder,
+        setOutputFolderPath,
+        setShutdownWhenDone,
+      });
       setEditingRunId(null);
       setLocalErrorMessage(null);
       setIsLibraryPickerOpen(false);
@@ -530,6 +571,14 @@ export function PlannerPage({
                       {formatDuration(run.averageRenderTimeSeconds)} / {formatDuration(run.estimatedRemainingSeconds)}
                     </p>
                   </div>
+                  {run.shutdownWhenDone ? (
+                    <div>
+                      <span className="section-kicker">After render</span>
+                      <p>
+                        <span className="planner-shutdown-badge">Shutdown</span>
+                      </p>
+                    </div>
+                  ) : null}
                 </div>
 
                 {getRunProgressLabel(run) || run.pid ? (
@@ -854,6 +903,20 @@ export function PlannerPage({
                   </div>
                 </label>
               ) : null}
+
+              <label className="planner-checkbox-field">
+                <span className="planner-checkbox-row">
+                  <input
+                    className="planner-checkbox-input"
+                    type="checkbox"
+                    aria-label="Shut down computer when render is done"
+                    checked={shutdownWhenDone}
+                    onChange={(event) => setShutdownWhenDone(event.target.checked)}
+                  />
+                  <span>Shut down computer when render is done</span>
+                </span>
+                <span className="planner-checkbox-copy">After a successful render, Windows will shut down this computer after a 10 second delay.</span>
+              </label>
 
               {localErrorMessage || submitErrorMessage ? <p className="confirm-dialog-error">{localErrorMessage ?? submitErrorMessage}</p> : null}
 
