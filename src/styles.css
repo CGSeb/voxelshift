@@ -2332,12 +2332,23 @@ select.release-config-input option {
   gap: 18px;
 }
 
-.planner-form-card-modal {
-  border: 0;
+.planner-schedule-dialog {
+  overflow: hidden;
   padding: 0;
+}
+
+.planner-form-card-modal {
+  max-height: inherit;
+  border: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 24px;
   background: transparent;
   box-shadow: none;
   backdrop-filter: none;
+  border-radius: inherit;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 
 .planner-form-grid {
@@ -2825,6 +2836,21 @@ select.release-config-input option {
   color: rgba(232, 240, 238, 0.7);
   font-size: 0.82rem;
   letter-spacing: 0.01em;
+}
+
+.planner-shutdown-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.34rem 0.72rem;
+  background: rgba(255, 92, 92, 0.18);
+  border: 1px solid rgba(255, 122, 122, 0.36);
+  color: #ffd3d3;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
 }
 
 @media (max-width: 1100px) {

@@ -120,6 +120,7 @@ export interface PlannerRunSummary {
   endFrame: number;
   startAt: number;
   outputFolderPath?: string | null;
+  shutdownWhenDone: boolean;
   createdAt: number;
   startedAt: number | null;
   completedAt: number | null;

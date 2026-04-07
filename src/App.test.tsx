@@ -155,6 +155,7 @@ const plannerRun: PlannerRunSummary = {
   endFrame: 120,
   startAt: 1_700_000_000,
   outputFolderPath: "D:\\Renders\\Shot_010",
+  shutdownWhenDone: false,
   createdAt: 1_700_000_000,
   startedAt: null,
   completedAt: null,
@@ -833,12 +834,13 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Schedule render" }));
 
     await waitFor(() => {
-      expect(apiMocks.createPlannerRun).toHaveBeenCalledWith(
+        expect(apiMocks.createPlannerRun).toHaveBeenCalledWith(
         expect.objectContaining({
           blendFilePath: plannerRun.blendFilePath,
           startFrame: 1,
           endFrame: 250,
           outputFolderPath: "D:\\Renders\\Shot_010",
+          shutdownWhenDone: false,
           blender: {
             source: "library",
             versionId: installedVersion.id,
@@ -858,13 +860,14 @@ describe("App", () => {
     fireEvent.click(within(editDialog).getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(apiMocks.updatePlannerRun).toHaveBeenCalledWith(
+        expect(apiMocks.updatePlannerRun).toHaveBeenCalledWith(
         plannerRun.id,
         expect.objectContaining({
           blendFilePath: plannerRun.blendFilePath,
           startFrame: 1,
           endFrame: 180,
           outputFolderPath: "D:\\Renders\\Shot_010",
+          shutdownWhenDone: false,
           blender: {
             source: "library",
             versionId: installedVersion.id,
@@ -902,16 +905,18 @@ describe("App", () => {
     expect(within(duplicateDialog).getByDisplayValue("180")).toBeInTheDocument();
     expect(within(duplicateDialog).getByDisplayValue("D:\\Renders\\Shot_010")).toBeInTheDocument();
     expect(within(duplicateDialog).getByLabelText("Override output folder")).toBeChecked();
+    expect(within(duplicateDialog).getByLabelText("Shut down computer when render is done")).not.toBeChecked();
 
     fireEvent.click(within(duplicateDialog).getByRole("button", { name: "Schedule render" }));
 
     await waitFor(() => {
-      expect(apiMocks.createPlannerRun).toHaveBeenLastCalledWith(
+        expect(apiMocks.createPlannerRun).toHaveBeenLastCalledWith(
         expect.objectContaining({
           blendFilePath: updatedPlannerRun.blendFilePath,
           startFrame: 1,
           endFrame: 180,
           outputFolderPath: "D:\\Renders\\Shot_010",
+          shutdownWhenDone: false,
           blender: {
             source: "library",
             versionId: installedVersion.id,

@@ -137,6 +137,7 @@ const plannerRun: PlannerRunSummary = {
   endFrame: 120,
   startAt: 1_700_000_000,
   outputFolderPath: "D:\\Renders\\Shot_010",
+  shutdownWhenDone: false,
   createdAt: 1_700_000_000,
   startedAt: null,
   completedAt: null,

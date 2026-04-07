@@ -17,6 +17,8 @@ const PLANNER_RUNS_EVENT: &str = "planner-runs-updated";
 const PLANNER_LOG_EVENT: &str = "planner-log";
 const MAX_PLANNER_LOG_LINES: usize = 5_000;
 const PLANNER_SCHEDULER_INTERVAL_MS: u64 = 1_000;
+const PLANNER_NEXT_RUN_DELAY_SECONDS: u64 = 10;
+const PLANNER_SHUTDOWN_DELAY_SECONDS: u64 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +61,8 @@ pub(crate) struct CreatePlannerRunRequest {
     pub(crate) end_frame: u32,
     pub(crate) start_at: u64,
     pub(crate) output_folder_path: Option<String>,
+    #[serde(default)]
+    pub(crate) shutdown_when_done: bool,
     pub(crate) blender: CreatePlannerBlenderRequest,
 }
 
@@ -69,6 +73,7 @@ pub(crate) struct ResolvedPlannerRunRequest {
     pub(crate) end_frame: u32,
     pub(crate) start_at: u64,
     pub(crate) output_folder_path: Option<String>,
+    pub(crate) shutdown_when_done: bool,
     pub(crate) blender_target: PlannerBlenderTarget,
 }
 
@@ -82,6 +87,8 @@ pub(crate) struct PlannerRunSummary {
     start_at: u64,
     #[serde(default)]
     output_folder_path: Option<String>,
+    #[serde(default)]
+    shutdown_when_done: bool,
     created_at: u64,
     started_at: Option<u64>,
     completed_at: Option<u64>,
@@ -123,6 +130,8 @@ struct PlannerRunRecord {
     start_at: u64,
     #[serde(default)]
     output_folder_path: Option<String>,
+    #[serde(default)]
+    shutdown_when_done: bool,
     created_at: u64,
     started_at: Option<u64>,
     completed_at: Option<u64>,
@@ -152,6 +161,7 @@ struct PlannerState {
     active_processes: BTreeMap<String, Arc<Mutex<Child>>>,
     dirty: bool,
     scheduler_started: bool,
+    next_scheduled_start_after: Option<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -207,6 +217,7 @@ fn replace_planner_state(state: &mut PlannerState, stored: PlannerStoredState, c
     state.runs = stored.runs;
     state.active_processes.clear();
     state.dirty = changed;
+    state.next_scheduled_start_after = None;
 
     if state.scheduler_started {
         false
@@ -303,6 +314,7 @@ fn update_planner_run_in_state(
         run.end_frame = request.end_frame;
         run.start_at = request.start_at;
         run.output_folder_path = request.output_folder_path;
+        run.shutdown_when_done = request.shutdown_when_done;
         run.blender_target = request.blender_target;
         run.started_at = None;
         run.completed_at = None;
@@ -361,6 +373,7 @@ fn planner_run_record(request: ResolvedPlannerRunRequest, created_at: u64) -> Pl
         end_frame: request.end_frame,
         start_at,
         output_folder_path: request.output_folder_path,
+        shutdown_when_done: request.shutdown_when_done,
         created_at,
         started_at: None,
         completed_at: None,
@@ -475,9 +488,7 @@ fn planner_logs(planner: &PlannerRegistry, run_id: &str) -> Result<Vec<PlannerLo
 
 fn spawn_scheduler<R: tauri::Runtime>(app: AppHandle<R>, planner: PlannerRegistry) {
     thread::spawn(move || loop {
-        let due_runs = collect_due_runs(&planner);
-
-        for run_id in due_runs {
+        if let Some(run_id) = next_due_run_to_start(&planner) {
             if let Err(error) = start_due_run(&app, &planner, &run_id) {
                 eprintln!("Unable to start planner run {run_id}: {error}");
             }
@@ -492,6 +503,7 @@ fn spawn_scheduler<R: tauri::Runtime>(app: AppHandle<R>, planner: PlannerRegistr
     });
 }
 
+#[cfg(test)]
 fn collect_due_runs(planner: &PlannerRegistry) -> Vec<String> {
     let now = current_timestamp();
     let state = match planner.inner.lock() {
@@ -505,6 +517,34 @@ fn collect_due_runs(planner: &PlannerRegistry) -> Vec<String> {
         .filter(|run| run.status == PlannerRunStatus::Pending && run.start_at <= now)
         .map(|run| run.id.clone())
         .collect()
+}
+
+fn next_due_run_to_start(planner: &PlannerRegistry) -> Option<String> {
+    let now = current_timestamp();
+    let state = planner.inner.lock().ok()?;
+
+    if state.runs.iter().any(|run| run.status == PlannerRunStatus::Running) {
+        return None;
+    }
+
+    if state
+        .next_scheduled_start_after
+        .is_some_and(|start_after| now < start_after)
+    {
+        return None;
+    }
+
+    state
+        .runs
+        .iter()
+        .filter(|run| run.status == PlannerRunStatus::Pending && run.start_at <= now)
+        .min_by(|left, right| {
+            left.start_at
+                .cmp(&right.start_at)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .map(|run| run.id.clone())
 }
 
 fn has_pending_or_running_runs(planner: &PlannerRegistry) -> bool {
@@ -628,6 +668,7 @@ fn start_due_run<R: tauri::Runtime>(
         stored_run.current_frame_started_at = None;
         stored_run.rendered_frame_count = 0;
         state.active_processes.insert(run_id.to_string(), child.clone());
+        state.next_scheduled_start_after = None;
         state.dirty = true;
     }
 
@@ -724,6 +765,36 @@ fn finalize_run_after_exit(
     exit_message
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ProcessExitOutcome {
+    exit_message: String,
+    should_shutdown: bool,
+}
+
+fn process_run_exit_in_state(
+    state: &mut PlannerState,
+    run_id: &str,
+    completed_at: u64,
+    exit_code: Option<i32>,
+    succeeded: bool,
+) -> Result<ProcessExitOutcome, String> {
+    let Some(run) = state.runs.iter_mut().find(|run| run.id == run_id) else {
+        return Err("That planner run could not be found.".to_string());
+    };
+
+    let should_shutdown = succeeded && run.shutdown_when_done;
+    let exit_message = finalize_run_after_exit(run, completed_at, exit_code, succeeded);
+    state.active_processes.remove(run_id);
+    state.next_scheduled_start_after =
+        Some(completed_at.saturating_add(PLANNER_NEXT_RUN_DELAY_SECONDS));
+    state.dirty = true;
+
+    Ok(ProcessExitOutcome {
+        exit_message,
+        should_shutdown,
+    })
+}
+
 fn spawn_process_monitor<R: tauri::Runtime>(
     app: AppHandle<R>,
     planner: PlannerRegistry,
@@ -749,27 +820,33 @@ fn spawn_process_monitor<R: tauri::Runtime>(
 
         if let Some(status) = status {
             let completed_at = current_timestamp();
-            let exit_message = {
+            let outcome = {
                 let mut state = match planner.inner.lock() {
                     Ok(state) => state,
                     Err(_) => break,
                 };
-                let Some(run) = state.runs.iter_mut().find(|run| run.id == run_id) else {
-                    break;
-                };
-
-                let exit_message = finalize_run_after_exit(
-                    run,
+                match process_run_exit_in_state(
+                    &mut state,
+                    &run_id,
                     completed_at,
                     status.code(),
                     status.success(),
-                );
-                state.active_processes.remove(&run_id);
-                state.dirty = true;
-                exit_message
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(_) => break,
+                }
             };
 
-            let _ = append_log_and_emit(&app, &planner, &run_id, "system", &exit_message);
+            let _ = append_log_and_emit(&app, &planner, &run_id, "system", &outcome.exit_message);
+            if outcome.should_shutdown {
+                let shutdown_message = match schedule_system_shutdown() {
+                    Ok(()) => format!(
+                        "Computer shutdown scheduled in {PLANNER_SHUTDOWN_DELAY_SECONDS} seconds."
+                    ),
+                    Err(error) => format!("Could not schedule computer shutdown: {error}"),
+                };
+                let _ = append_log_and_emit(&app, &planner, &run_id, "system", &shutdown_message);
+            }
             let _ = save_if_dirty(&app, &planner);
             emit_planner_runs_changed(&app, &planner);
             break;
@@ -874,6 +951,7 @@ fn summarize_run(run: &PlannerRunRecord, now: u64) -> PlannerRunSummary {
         end_frame: run.end_frame,
         start_at: run.start_at,
         output_folder_path: run.output_folder_path.clone(),
+        shutdown_when_done: run.shutdown_when_done,
         created_at: run.created_at,
         started_at: run.started_at,
         completed_at: run.completed_at,
@@ -948,7 +1026,10 @@ fn take_dirty_runs(state: &mut PlannerState) -> Option<Vec<PlannerRunRecord>> {
     Some(state.runs.clone())
 }
 
-fn save_if_dirty<R: tauri::Runtime>(app: &AppHandle<R>, planner: &PlannerRegistry) -> Result<(), String> {
+fn save_if_dirty_with<F>(planner: &PlannerRegistry, mut save_runs: F) -> Result<(), String>
+where
+    F: FnMut(&[PlannerRunRecord]) -> Result<(), String>,
+{
     let runs = {
         let mut state = planner
             .inner
@@ -961,7 +1042,7 @@ fn save_if_dirty<R: tauri::Runtime>(app: &AppHandle<R>, planner: &PlannerRegistr
         }
     };
 
-    if let Err(error) = save_planner_state(app, &runs) {
+    if let Err(error) = save_runs(&runs) {
         if let Ok(mut state) = planner.inner.lock() {
             state.dirty = true;
         }
@@ -969,6 +1050,10 @@ fn save_if_dirty<R: tauri::Runtime>(app: &AppHandle<R>, planner: &PlannerRegistr
     }
 
     Ok(())
+}
+
+fn save_if_dirty<R: tauri::Runtime>(app: &AppHandle<R>, planner: &PlannerRegistry) -> Result<(), String> {
+    save_if_dirty_with(planner, |runs| save_planner_state(app, runs))
 }
 
 fn load_planner_state_from_path(file_path: &Path) -> Result<PlannerStoredState, String> {
@@ -1139,6 +1224,38 @@ fn blender_output_path_argument(value: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
+fn schedule_system_shutdown() -> Result<(), String> {
+    let delay = PLANNER_SHUTDOWN_DELAY_SECONDS.to_string();
+    let mut command = Command::new("shutdown.exe");
+    command
+        .args(["/s", "/t", &delay, "/f"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    command.creation_flags(0x08000000);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Failed to start Windows shutdown: {error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "Windows rejected the shutdown request.".to_string()
+        } else {
+            stderr
+        })
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn schedule_system_shutdown() -> Result<(), String> {
+    Err("Shutdown after render is only available on Windows.".to_string())
+}
+
+#[cfg(target_os = "windows")]
 fn pick_windows_file(title: &str, filter: &str) -> Result<Option<String>, String> {
     let escaped_title = title.replace('\'', "''");
     let escaped_filter = filter.replace('\'', "''");
@@ -1232,6 +1349,7 @@ mod tests {
             end_frame: 10,
             start_at: 1,
             output_folder_path: None,
+            shutdown_when_done: false,
             created_at: 1,
             started_at: Some(2),
             completed_at: None,
@@ -1428,6 +1546,7 @@ mod tests {
             end_frame: 10,
             start_at: 5,
             output_folder_path: None,
+            shutdown_when_done: false,
             created_at: 5,
             started_at: Some(20),
             completed_at: None,
@@ -1520,6 +1639,86 @@ mod tests {
         assert_eq!(planner_logs(&registry, "pending-due").unwrap().len(), 1);
         assert_eq!(collect_due_runs(&registry), vec!["pending-due".to_string()]);
         assert!(has_pending_or_running_runs(&registry));
+        assert_eq!(next_due_run_to_start(&registry), None);
+    }
+
+    #[test]
+    fn next_due_run_to_start_waits_for_running_render_and_delay() {
+        let mut pending_older = test_run(Vec::new());
+        pending_older.id = "pending-older".to_string();
+        pending_older.status = PlannerRunStatus::Pending;
+        pending_older.start_at = current_timestamp().saturating_sub(30);
+        pending_older.created_at = 10;
+
+        let mut pending_newer = test_run(Vec::new());
+        pending_newer.id = "pending-newer".to_string();
+        pending_newer.status = PlannerRunStatus::Pending;
+        pending_newer.start_at = current_timestamp().saturating_sub(5);
+        pending_newer.created_at = 20;
+
+        let registry = test_registry(vec![pending_newer.clone(), pending_older.clone()]);
+        assert_eq!(next_due_run_to_start(&registry), Some("pending-older".to_string()));
+
+        {
+            let mut state = registry.inner.lock().unwrap();
+            state.runs.push(PlannerRunRecord {
+                status: PlannerRunStatus::Running,
+                id: "running".to_string(),
+                started_at: Some(current_timestamp().saturating_sub(2)),
+                ..test_run(Vec::new())
+            });
+        }
+        assert_eq!(next_due_run_to_start(&registry), None);
+
+        {
+            let mut state = registry.inner.lock().unwrap();
+            state.runs.retain(|run| run.id != "running");
+            state.next_scheduled_start_after = Some(current_timestamp().saturating_add(5));
+        }
+        assert_eq!(next_due_run_to_start(&registry), None);
+
+        {
+            let mut state = registry.inner.lock().unwrap();
+            state.next_scheduled_start_after = Some(current_timestamp().saturating_sub(1));
+        }
+        assert_eq!(next_due_run_to_start(&registry), Some("pending-older".to_string()));
+    }
+
+    #[test]
+    fn next_due_run_to_start_uses_created_at_and_id_as_tie_breakers() {
+        let now = current_timestamp();
+
+        let mut first = test_run(Vec::new());
+        first.id = "alpha".to_string();
+        first.status = PlannerRunStatus::Pending;
+        first.start_at = now.saturating_sub(5);
+        first.created_at = 10;
+        first.started_at = None;
+
+        let mut second = test_run(Vec::new());
+        second.id = "zeta".to_string();
+        second.status = PlannerRunStatus::Pending;
+        second.start_at = first.start_at;
+        second.created_at = first.created_at;
+        second.started_at = None;
+
+        let mut newer = test_run(Vec::new());
+        newer.id = "newer".to_string();
+        newer.status = PlannerRunStatus::Pending;
+        newer.start_at = first.start_at;
+        newer.created_at = 20;
+        newer.started_at = None;
+
+        let registry = test_registry(vec![newer, second, first]);
+        assert_eq!(next_due_run_to_start(&registry), Some("alpha".to_string()));
+
+        {
+            let mut state = registry.inner.lock().unwrap();
+            for run in &mut state.runs {
+                run.start_at = now.saturating_add(60);
+            }
+        }
+        assert_eq!(next_due_run_to_start(&registry), None);
     }
 
     #[test]
@@ -1531,6 +1730,7 @@ mod tests {
         run.current_frame_started_at = None;
         run.rendered_frame_count = total_frames(&run);
         run.pid = None;
+        run.shutdown_when_done = true;
 
         assert_eq!(average_render_time_seconds(&run), None);
 
@@ -1538,6 +1738,27 @@ mod tests {
         assert_eq!(summary.average_render_time_seconds, None);
         assert_eq!(summary.estimated_remaining_seconds, None);
         assert_eq!(summary.status, PlannerRunStatus::Completed);
+        assert!(summary.shutdown_when_done);
+    }
+
+    #[test]
+    fn summary_helpers_return_zero_eta_when_running_frame_count_is_complete() {
+        let mut run = test_run(vec![PlannerLogEntry {
+            id: "log-1".to_string(),
+            run_id: "planner-test".to_string(),
+            source: "stdout".to_string(),
+            message: "render           | Time: 00:08.00 (Saving: 00:00.10)".to_string(),
+            timestamp: 10,
+        }]);
+        run.status = PlannerRunStatus::Running;
+        run.start_frame = 1;
+        run.end_frame = 3;
+        run.current_frame = Some(3);
+        run.current_frame_started_at = None;
+        run.rendered_frame_count = total_frames(&run);
+
+        let summary = summarize_run(&run, 100);
+        assert_eq!(summary.estimated_remaining_seconds, Some(0.0));
     }
 
     #[test]
@@ -1605,6 +1826,11 @@ mod tests {
         let sandbox = test_temp_dir("planner-missing-paths");
         let missing_file = sandbox.join("missing.blend");
         let missing_dir = sandbox.join("missing-folder");
+        let existing_file = sandbox.join("scene.blend");
+        let existing_dir = sandbox.join("renders");
+
+        fs::write(&existing_file, b"blend").unwrap();
+        fs::create_dir_all(&existing_dir).unwrap();
 
         assert_eq!(
             validate_existing_file_path(missing_file.to_string_lossy().as_ref(), "Choose a file"),
@@ -1612,6 +1838,14 @@ mod tests {
         );
         assert_eq!(
             validate_existing_directory_path(missing_dir.to_string_lossy().as_ref(), "Choose a folder"),
+            Err("That folder could not be found.".to_string())
+        );
+        assert_eq!(
+            validate_existing_file_path(existing_dir.to_string_lossy().as_ref(), "Choose a file"),
+            Err("That file could not be found.".to_string())
+        );
+        assert_eq!(
+            validate_existing_directory_path(existing_file.to_string_lossy().as_ref(), "Choose a folder"),
             Err("That folder could not be found.".to_string())
         );
         assert_eq!(parse_render_time_seconds("render | Time:"), None);
@@ -1628,6 +1862,7 @@ mod tests {
             end_frame: 10,
             start_at: 1,
             output_folder_path: None,
+            shutdown_when_done: false,
             created_at,
             started_at,
             completed_at,
@@ -1668,6 +1903,7 @@ mod tests {
             end_frame: 8,
             start_at: 42,
             output_folder_path,
+            shutdown_when_done: false,
             blender_target: PlannerBlenderTarget {
                 source: PlannerBlenderSource::Custom,
                 version_id: None,
@@ -1707,6 +1943,67 @@ mod tests {
     }
 
     #[test]
+    fn process_exit_helper_updates_state_for_success_failure_and_missing_runs() {
+        let mut successful_run = test_run(Vec::new());
+        successful_run.id = "success".to_string();
+        successful_run.status = PlannerRunStatus::Running;
+        successful_run.shutdown_when_done = true;
+
+        let mut failed_run = test_run(Vec::new());
+        failed_run.id = "failed".to_string();
+        failed_run.status = PlannerRunStatus::Running;
+        failed_run.shutdown_when_done = true;
+
+        let mut state = PlannerState {
+            runs: vec![successful_run, failed_run],
+            ..PlannerState::default()
+        };
+
+        let success_outcome =
+            process_run_exit_in_state(&mut state, "success", 500, Some(0), true).unwrap();
+        assert_eq!(
+            success_outcome,
+            ProcessExitOutcome {
+                exit_message: "Render finished with exit code 0.".to_string(),
+                should_shutdown: true,
+            }
+        );
+        assert_eq!(state.runs[0].status, PlannerRunStatus::Completed);
+        assert_eq!(state.runs[0].completed_at, Some(500));
+        assert_eq!(
+            state.next_scheduled_start_after,
+            Some(500 + PLANNER_NEXT_RUN_DELAY_SECONDS)
+        );
+        assert!(state.dirty);
+
+        state.dirty = false;
+        let failed_outcome =
+            process_run_exit_in_state(&mut state, "failed", 600, Some(2), false).unwrap();
+        assert_eq!(
+            failed_outcome,
+            ProcessExitOutcome {
+                exit_message: "Render finished with exit code 2.".to_string(),
+                should_shutdown: false,
+            }
+        );
+        assert_eq!(state.runs[1].status, PlannerRunStatus::Failed);
+        assert_eq!(
+            state.runs[1].last_error_message.as_deref(),
+            Some("Render finished with exit code 2.")
+        );
+        assert_eq!(
+            state.next_scheduled_start_after,
+            Some(600 + PLANNER_NEXT_RUN_DELAY_SECONDS)
+        );
+        assert!(state.dirty);
+
+        assert!(matches!(
+            process_run_exit_in_state(&mut state, "missing", 700, None, true),
+            Err(message) if message == "That planner run could not be found."
+        ));
+    }
+
+    #[test]
     fn state_mutation_helpers_create_update_delete_and_take_dirty_runs() {
         let sandbox = test_temp_dir("planner-state-mutations");
         let blend_file = sandbox.join("scene.blend");
@@ -1727,6 +2024,7 @@ mod tests {
             100,
         );
         assert_eq!(created.status, PlannerRunStatus::Pending);
+        assert!(!created.shutdown_when_done);
         assert_eq!(state.runs.len(), 1);
         assert!(state.dirty);
         assert_eq!(take_dirty_runs(&mut state).unwrap().len(), 1);
@@ -1745,6 +2043,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.output_folder_path, None);
+        assert!(!updated.shutdown_when_done);
         assert!(state.dirty);
         state.runs[0].status = PlannerRunStatus::Completed;
         assert!(matches!(
@@ -1772,6 +2071,36 @@ mod tests {
     }
 
     #[test]
+    fn save_if_dirty_with_restores_dirty_state_after_failures() {
+        let registry = test_registry(vec![test_run(Vec::new())]);
+        {
+            let mut state = registry.inner.lock().unwrap();
+            state.dirty = true;
+        }
+
+        let error = save_if_dirty_with(&registry, |_runs| Err("disk full".to_string())).unwrap_err();
+        assert_eq!(error, "disk full");
+        assert!(registry.inner.lock().unwrap().dirty);
+
+        let mut saved_count = 0;
+        save_if_dirty_with(&registry, |runs| {
+            saved_count = runs.len();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(saved_count, 1);
+        assert!(!registry.inner.lock().unwrap().dirty);
+
+        let mut invoked = false;
+        save_if_dirty_with(&registry, |_runs| {
+            invoked = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!invoked);
+    }
+
+    #[test]
     fn persistence_launch_and_exit_helpers_cover_remaining_branches() {
         let sandbox = test_temp_dir("planner-persistence");
         let blend_file = sandbox.join("scene.blend");
@@ -1787,11 +2116,21 @@ mod tests {
             Some(path_to_string(&output_dir)),
             path_to_string(&blender_executable),
         );
-        let run = planner_run_record(request, 123);
+        let mut run = planner_run_record(request, 123);
+        run.shutdown_when_done = true;
+        run.logs.push(PlannerLogEntry {
+            id: "planner-log-1".to_string(),
+            run_id: run.id.clone(),
+            source: "system".to_string(),
+            message: "Queued".to_string(),
+            timestamp: 124,
+        });
         save_planner_state_to_path(&state_file, &[run.clone()]).unwrap();
         let loaded = load_planner_state_from_path(&state_file).unwrap();
         assert_eq!(loaded.runs.len(), 1);
         assert_eq!(loaded.runs[0].id, run.id);
+        assert!(loaded.runs[0].shutdown_when_done);
+        assert_eq!(loaded.runs[0].logs.len(), 1);
         assert!(load_planner_state_from_path(&sandbox.join("missing.json")).unwrap().runs.is_empty());
         fs::write(&state_file, "{bad json").unwrap();
         assert!(load_planner_state_from_path(&state_file)
@@ -1821,6 +2160,38 @@ mod tests {
         assert_eq!(failure_message, "Render finished with exit code 9.");
         assert_eq!(failed.status, PlannerRunStatus::Failed);
         assert_eq!(failed.last_error_message.as_deref(), Some("Render finished with exit code 9."));
+    }
+
+    #[test]
+    fn state_mutation_helpers_preserve_shutdown_preferences() {
+        let sandbox = test_temp_dir("planner-shutdown-preferences");
+        let blend_file = sandbox.join("scene.blend");
+        let blender_executable = sandbox.join("blender.exe");
+        fs::write(&blend_file, b"blend").unwrap();
+        fs::write(&blender_executable, b"binary").unwrap();
+
+        let mut state = PlannerState::default();
+        let mut create_request = test_request(
+            path_to_string(&blend_file),
+            None,
+            path_to_string(&blender_executable),
+        );
+        create_request.shutdown_when_done = true;
+
+        let created = create_planner_run_in_state(&mut state, create_request, 100);
+        assert!(created.shutdown_when_done);
+        assert!(state.runs[0].shutdown_when_done);
+
+        let mut update_request = test_request(
+            path_to_string(&blend_file),
+            None,
+            path_to_string(&blender_executable),
+        );
+        update_request.shutdown_when_done = false;
+
+        let updated = update_planner_run_in_state(&mut state, &created.id, update_request, 150).unwrap();
+        assert!(!updated.shutdown_when_done);
+        assert!(!state.runs[0].shutdown_when_done);
     }
 }
 

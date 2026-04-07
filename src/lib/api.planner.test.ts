@@ -30,6 +30,7 @@ describe("planner api wrappers", () => {
       endFrame: 120,
       startAt: 1_775_688_000,
       outputFolderPath: "D:\\renders",
+      shutdownWhenDone: true,
       blender: {
         source: "library" as const,
         versionId: "version-1",

@@ -34,6 +34,7 @@ const pendingRun: PlannerRunSummary = {
   startFrame: 1,
   endFrame: 120,
   startAt: 1_775_688_000,
+  shutdownWhenDone: false,
   createdAt: 1_775_684_400,
   startedAt: null,
   completedAt: null,
@@ -75,6 +76,7 @@ const completedRun: PlannerRunSummary = {
   id: "planner-completed",
   blendFilePath: "D:\\Projects\\completed-scene.blend",
   status: "completed",
+  shutdownWhenDone: true,
   currentFrame: 120,
   renderedFrameCount: 120,
   averageRenderTimeSeconds: 3,
@@ -191,6 +193,8 @@ describe("PlannerPage", () => {
       expect(screen.queryByText("Please choose an output folder.")).not.toBeInTheDocument();
     });
 
+    fireEvent.click(within(modal).getByLabelText("Shut down computer when render is done"));
+
     fireEvent.click(within(modal).getByRole("button", { name: "Schedule render" }));
 
     await waitFor(() => {
@@ -200,6 +204,7 @@ describe("PlannerPage", () => {
         endFrame: 250,
         startAt: Math.floor(new Date("2026-04-15T23:59").getTime() / 1000),
         outputFolderPath: "D:\\Renders\\Shot_020",
+        shutdownWhenDone: true,
         blender: {
           source: "custom",
           versionId: null,
@@ -218,6 +223,7 @@ describe("PlannerPage", () => {
         endFrame: 250,
         startAt: Math.floor(new Date("2026-04-15T23:59").getTime() / 1000),
         outputFolderPath: "D:\\Renders\\Shot_020",
+        shutdownWhenDone: true,
         blender: {
           source: "custom",
           versionId: null,
@@ -284,11 +290,13 @@ describe("PlannerPage", () => {
     expect(screen.getByText("Waiting for frame output")).toBeInTheDocument();
     expect(screen.getByText("Render failed")).toBeInTheDocument();
     expect(screen.getByText(/6m 0s/)).toBeInTheDocument();
+    expect(screen.getByText("Shutdown")).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Edit pending-scene.blend" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open logs for failed-scene.blend" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open logs for completed-scene.blend" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete running-scene.blend" })).toBeDisabled();
+    expect(screen.queryByText("Stay on")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Open logs for completed-scene.blend" }));
     expect(props.onOpenLogs).toHaveBeenCalledWith(completedRun);
@@ -300,6 +308,7 @@ describe("PlannerPage", () => {
     const duplicateModal = await screen.findByRole("dialog", { name: "Schedule a background animation render" });
     expect(within(duplicateModal).getByDisplayValue(failedRun.blendFilePath)).toBeInTheDocument();
     expect(within(duplicateModal).getByDisplayValue(String(failedRun.endFrame))).toBeInTheDocument();
+    expect(within(duplicateModal).getByLabelText("Shut down computer when render is done")).not.toBeChecked();
 
     fireEvent.click(within(duplicateModal).getByRole("button", { name: "Cancel" }));
 
@@ -307,6 +316,44 @@ describe("PlannerPage", () => {
     const editModal = await screen.findByRole("dialog", { name: "Edit a planned background animation render" });
     expect(within(editModal).getByDisplayValue(pendingRun.blendFilePath)).toBeInTheDocument();
     expect(within(editModal).getByRole("button", { name: "Save changes" })).toBeInTheDocument();
+  });
+
+  it("preserves and updates the shutdown option when duplicating or editing runs", async () => {
+    const props = createDefaultProps();
+    const pendingShutdownRun: PlannerRunSummary = {
+      ...pendingRun,
+      id: "planner-pending-shutdown",
+      blendFilePath: "D:\\Projects\\pending-shutdown.blend",
+      shutdownWhenDone: true,
+    };
+
+    render(<PlannerPage {...props} plannerRuns={[completedRun, pendingShutdownRun]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate completed-scene.blend" }));
+    const duplicateModal = await screen.findByRole("dialog", { name: "Schedule a background animation render" });
+    expect(within(duplicateModal).getByLabelText("Shut down computer when render is done")).toBeChecked();
+    fireEvent.click(within(duplicateModal).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+    const createModal = await screen.findByRole("dialog", { name: "Schedule a background animation render" });
+    expect(within(createModal).getByLabelText("Shut down computer when render is done")).not.toBeChecked();
+    fireEvent.click(within(createModal).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit pending-shutdown.blend" }));
+    const editModal = await screen.findByRole("dialog", { name: "Edit a planned background animation render" });
+    const shutdownCheckbox = within(editModal).getByLabelText("Shut down computer when render is done");
+    expect(shutdownCheckbox).toBeChecked();
+    fireEvent.click(shutdownCheckbox);
+    fireEvent.click(within(editModal).getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(props.onUpdateRun).toHaveBeenCalledWith(
+        pendingShutdownRun.id,
+        expect.objectContaining({
+          shutdownWhenDone: false,
+        }),
+      );
+    });
   });
 
   it("disables library submission when no installed Blender versions are available", async () => {
