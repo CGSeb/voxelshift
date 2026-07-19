@@ -13,6 +13,7 @@ interface ReleasesPageProps {
   isLoadingReleases: boolean;
   favoriteVersionCount: number;
   favoriteReleaseValues: string[];
+  blenderLtsReleaseLines: string[];
   installStatuses: Record<string, BlenderReleaseInstallProgress>;
   installedReleaseVersions: Map<string, BlenderVersion>;
   onRefresh: () => void;
@@ -33,6 +34,7 @@ interface ReleaseListProps {
   emptyMessage: string;
   isExperimentalList?: boolean;
   favoriteReleaseValues: string[];
+  blenderLtsReleaseLines: string[];
   installStatuses: Record<string, BlenderReleaseInstallProgress>;
   installedReleaseVersions: Map<string, BlenderVersion>;
   isCurrentPlatformList: boolean;
@@ -51,6 +53,7 @@ function ReleaseList({
   emptyMessage,
   isExperimentalList = false,
   favoriteReleaseValues,
+  blenderLtsReleaseLines,
   installStatuses,
   installedReleaseVersions,
   isCurrentPlatformList,
@@ -85,6 +88,7 @@ function ReleaseList({
             key={download.id}
             download={download}
             favoriteReleaseValues={favoriteReleaseValues}
+            blenderLtsReleaseLines={blenderLtsReleaseLines}
             installStatuses={installStatuses}
             installedReleaseVersions={installedReleaseVersions}
             isCurrentPlatformList={isCurrentPlatformList}
@@ -108,6 +112,7 @@ export function ReleasesPage({
   isLoadingReleases,
   favoriteVersionCount,
   favoriteReleaseValues,
+  blenderLtsReleaseLines,
   installStatuses,
   installedReleaseVersions,
   onRefresh,
@@ -190,6 +195,7 @@ export function ReleasesPage({
           emptyTitle="No stable builds found"
           emptyMessage="Scanning the official Blender release folders did not return any matching downloads."
           favoriteReleaseValues={favoriteReleaseValues}
+          blenderLtsReleaseLines={blenderLtsReleaseLines}
           installStatuses={installStatuses}
           installedReleaseVersions={installedReleaseVersions}
           isCurrentPlatformList
@@ -208,6 +214,7 @@ export function ReleasesPage({
           emptyMessage="The daily builds page did not expose any installable x64 entries for this operating system."
           isExperimentalList
           favoriteReleaseValues={favoriteReleaseValues}
+          blenderLtsReleaseLines={blenderLtsReleaseLines}
           installStatuses={installStatuses}
           installedReleaseVersions={installedReleaseVersions}
           isCurrentPlatformList

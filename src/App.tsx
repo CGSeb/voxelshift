@@ -17,6 +17,7 @@ import {
   deletePlannerRun,
   updatePlannerRun,
   getBlenderConfigs,
+  getBlenderLtsReleaseLines,
   getBlenderReleaseDownloads,
   getLauncherState,
   getPlannerLogs,
@@ -300,6 +301,7 @@ function mergeBlenderSessions(currentSessions: BlenderSession[], runningProcesse
 export default function App() {
   const [activePage, setActivePage] = useState<PageKey>("home");
   const [releaseListing, setReleaseListing] = useState<BlenderReleaseListing | null>(null);
+  const [blenderLtsReleaseLines, setBlenderLtsReleaseLines] = useState<string[]>([]);
   const [launcherState, setLauncherState] = useState<LauncherState | null>(null);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
   const [installStatuses, setInstallStatuses] = useState<Record<string, BlenderReleaseInstallProgress>>({});
@@ -578,6 +580,29 @@ export default function App() {
   useEffect(() => {
     let isDisposed = false;
 
+    async function loadBlenderLtsReleaseLines() {
+      try {
+        const lines = await getBlenderLtsReleaseLines();
+        if (!isDisposed) {
+          setBlenderLtsReleaseLines(lines);
+        }
+      } catch {
+        if (!isDisposed) {
+          setBlenderLtsReleaseLines([]);
+        }
+      }
+    }
+
+    void loadBlenderLtsReleaseLines();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+
     async function loadAppVersion() {
       try {
         const version = await getVersion();
@@ -690,9 +715,10 @@ export default function App() {
     setIsLoadingReleases(true);
     setReleaseError(null);
 
-    const [releaseResult, launcherResult] = await Promise.allSettled([
+    const [releaseResult, launcherResult, ltsReleaseLinesResult] = await Promise.allSettled([
       getBlenderReleaseDownloads(),
       getLauncherState(),
+      getBlenderLtsReleaseLines(),
     ]);
 
     if (releaseResult.status === "fulfilled") {
@@ -709,6 +735,10 @@ export default function App() {
       setLauncherState(launcherResult.value);
     } else {
       setLauncherState(null);
+    }
+
+    if (ltsReleaseLinesResult.status === "fulfilled") {
+      setBlenderLtsReleaseLines(ltsReleaseLinesResult.value);
     }
 
     setIsLoadingReleases(false);
@@ -1563,6 +1593,7 @@ export default function App() {
           <HomePage
             recentProjects={recentProjects}
             favoriteVersions={favoriteInstalledVersions}
+            blenderLtsReleaseLines={blenderLtsReleaseLines}
             errorMessage={homeError}
             onBrowseReleases={() => setActivePage("releases")}
             onOpenProject={(project) => void openRecentProject(project)}
@@ -1593,6 +1624,7 @@ export default function App() {
             isLoadingReleases={isLoadingReleases}
             favoriteVersionCount={favoriteReleaseVersions.length}
             favoriteReleaseValues={favoriteReleaseValues}
+            blenderLtsReleaseLines={blenderLtsReleaseLines}
             installStatuses={installStatuses}
             installedReleaseVersions={installedReleaseVersions}
             onRefresh={() => void refreshReleasePageData()}

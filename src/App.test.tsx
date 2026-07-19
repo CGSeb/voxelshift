@@ -27,6 +27,7 @@ const apiMocks = vi.hoisted(() => ({
   deletePlannerRun: vi.fn(),
   updatePlannerRun: vi.fn(),
   getBlenderConfigs: vi.fn(),
+  getBlenderLtsReleaseLines: vi.fn(),
   getBlenderReleaseDownloads: vi.fn(),
   getLauncherState: vi.fn(),
   getPlannerLogs: vi.fn(),
@@ -259,6 +260,7 @@ describe("App", () => {
     apiMocks.refreshManagedBlenderExtensions.mockResolvedValue(1);
     apiMocks.getRunningBlenders.mockResolvedValue([]);
     apiMocks.getRunningBlenderLogs.mockResolvedValue([runningBlenderLog]);
+    apiMocks.getBlenderLtsReleaseLines.mockResolvedValue(["4.2"]);
     apiMocks.getBlenderReleaseDownloads.mockResolvedValue(releaseListing);
     apiMocks.getBlenderConfigs.mockResolvedValue([savedConfig]);
     apiMocks.saveBlenderConfig.mockResolvedValue(savedConfig);

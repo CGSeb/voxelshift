@@ -49,6 +49,7 @@ describe("ReleaseRow", () => {
       <ReleaseRow
         download={download}
         favoriteReleaseValues={[download.version]}
+        blenderLtsReleaseLines={["4.2"]}
         installStatuses={{}}
         installedReleaseVersions={new Map([[download.version, installedVersion]])}
         isCurrentPlatformList
@@ -83,6 +84,7 @@ describe("ReleaseRow", () => {
       <ReleaseRow
         download={download}
         favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={["4.2"]}
         installStatuses={{}}
         installedReleaseVersions={new Map([[download.version, installedVersion]])}
         isCurrentPlatformList
@@ -116,6 +118,7 @@ describe("ReleaseRow", () => {
       <ReleaseRow
         download={download}
         favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={["4.2"]}
         installStatuses={{ [download.id]: makeInstallStatus() }}
         installedReleaseVersions={new Map()}
         isCurrentPlatformList
@@ -135,11 +138,52 @@ describe("ReleaseRow", () => {
     expect(onCancelInstall).toHaveBeenCalledWith(download);
   });
 
+  it("uses fetched LTS release lines instead of hardcoded release knowledge", () => {
+    const { rerender } = render(
+      <ReleaseRow
+        download={download}
+        favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={[]}
+        installStatuses={{}}
+        installedReleaseVersions={new Map()}
+        isCurrentPlatformList
+        onInstall={vi.fn()}
+        onCancelInstall={vi.fn()}
+        onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
+        onToggleFavorite={vi.fn()}
+        onOpenUninstall={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("LTS")).not.toBeInTheDocument();
+
+    rerender(
+      <ReleaseRow
+        download={download}
+        favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={["4.2"]}
+        installStatuses={{}}
+        installedReleaseVersions={new Map()}
+        isCurrentPlatformList
+        onInstall={vi.fn()}
+        onCancelInstall={vi.fn()}
+        onLaunchVersion={vi.fn()}
+        onOpenConfigs={vi.fn()}
+        onToggleFavorite={vi.fn()}
+        onOpenUninstall={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("LTS")).toBeInTheDocument();
+  });
+
   it("shows candidate, beta, and default experimental chip styles", () => {
     const { rerender } = render(
       <ReleaseRow
         download={{ ...download, channel: "Release Candidate" }}
         favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={["4.2"]}
         installStatuses={{ [download.id]: makeInstallStatus({ phase: "canceling", progressPercent: null, totalBytes: null }) }}
         installedReleaseVersions={new Map()}
         isCurrentPlatformList={false}
@@ -161,6 +205,7 @@ describe("ReleaseRow", () => {
       <ReleaseRow
         download={{ ...download, channel: "Beta" }}
         favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={["4.2"]}
         installStatuses={{ [download.id]: makeInstallStatus({ phase: "canceling", progressPercent: null, totalBytes: null }) }}
         installedReleaseVersions={new Map()}
         isCurrentPlatformList={false}
@@ -180,6 +225,7 @@ describe("ReleaseRow", () => {
       <ReleaseRow
         download={{ ...download, channel: "Nightly" }}
         favoriteReleaseValues={[]}
+        blenderLtsReleaseLines={["4.2"]}
         installStatuses={{ [download.id]: makeInstallStatus({ phase: "canceling", progressPercent: null, totalBytes: null }) }}
         installedReleaseVersions={new Map()}
         isCurrentPlatformList={false}

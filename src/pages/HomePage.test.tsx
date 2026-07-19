@@ -4,6 +4,7 @@ import { HomePage } from "./HomePage";
 import type { BlenderVersion, RecentProject } from "../types";
 
 const convertFileSrcMock = vi.hoisted(() => vi.fn((path: string) => `asset://${path}`));
+const relativeTimeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: convertFileSrcMock,
@@ -55,6 +56,7 @@ describe("HomePage", () => {
       <HomePage
         recentProjects={[]}
         favoriteVersions={[]}
+        blenderLtsReleaseLines={["4.2"]}
         errorMessage="Could not load your workspace"
         onBrowseReleases={onBrowseReleases}
         onOpenProject={vi.fn()}
@@ -93,6 +95,7 @@ describe("HomePage", () => {
       <HomePage
         recentProjects={recentProjects}
         favoriteVersions={favoriteVersions}
+        blenderLtsReleaseLines={["4.2"]}
         errorMessage={null}
         onBrowseReleases={vi.fn()}
         onOpenProject={onOpenProject}
@@ -135,6 +138,39 @@ describe("HomePage", () => {
     expect(onLaunchVersion).toHaveBeenCalledWith(expect.objectContaining({ id: "version-6" }));
   });
 
+  it("shows favorite LTS badges only for fetched release lines", () => {
+    const version = makeVersion(1);
+    const { rerender } = render(
+      <HomePage
+        recentProjects={[]}
+        favoriteVersions={[version]}
+        blenderLtsReleaseLines={[]}
+        errorMessage={null}
+        onBrowseReleases={vi.fn()}
+        onOpenProject={vi.fn()}
+        onRequestRemoveProject={vi.fn()}
+        onLaunchVersion={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("LTS")).not.toBeInTheDocument();
+
+    rerender(
+      <HomePage
+        recentProjects={[]}
+        favoriteVersions={[version]}
+        blenderLtsReleaseLines={["4.2"]}
+        errorMessage={null}
+        onBrowseReleases={vi.fn()}
+        onOpenProject={vi.fn()}
+        onRequestRemoveProject={vi.fn()}
+        onLaunchVersion={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("LTS")).toBeInTheDocument();
+  });
+
   it("formats valid recent project timestamps relative to the current time", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-20T12:00:00"));
@@ -148,6 +184,7 @@ describe("HomePage", () => {
           makeProject(4, { savedAt: "2025-12-31 12:00:00" }),
         ]}
         favoriteVersions={[]}
+        blenderLtsReleaseLines={["4.2"]}
         errorMessage={null}
         onBrowseReleases={vi.fn()}
         onOpenProject={vi.fn()}
@@ -156,9 +193,9 @@ describe("HomePage", () => {
       />,
     );
 
-    expect(screen.getByText("Saved 30 minutes ago")).toBeInTheDocument();
-    expect(screen.getByText("Saved 4 hours ago")).toBeInTheDocument();
-    expect(screen.getByText("Saved 2 days ago")).toBeInTheDocument();
+    expect(screen.getByText(`Saved ${relativeTimeFormatter.format(-30, "minute")}`)).toBeInTheDocument();
+    expect(screen.getByText(`Saved ${relativeTimeFormatter.format(-4, "hour")}`)).toBeInTheDocument();
+    expect(screen.getByText(`Saved ${relativeTimeFormatter.format(-2, "day")}`)).toBeInTheDocument();
     expect(
       screen.getByText(
         `Saved ${new Date("2025-12-31T12:00:00").toLocaleDateString(undefined, {

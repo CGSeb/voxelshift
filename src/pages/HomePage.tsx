@@ -7,6 +7,7 @@ import type { BlenderVersion, RecentProject } from "../types";
 interface HomePageProps {
   recentProjects: RecentProject[];
   favoriteVersions: BlenderVersion[];
+  blenderLtsReleaseLines: string[];
   errorMessage: string | null;
   onBrowseReleases: () => void;
   onOpenProject: (project: RecentProject) => void;
@@ -122,6 +123,7 @@ function CarouselControls({ label, page, pageCount, onPrevious, onNext }: Carous
 export function HomePage({
   recentProjects,
   favoriteVersions,
+  blenderLtsReleaseLines,
   errorMessage,
   onBrowseReleases,
   onOpenProject,
@@ -286,7 +288,7 @@ export function HomePage({
         <div className="home-row-track home-row-track-favorites" aria-label="Favorite Blender versions">
           {visibleFavoriteVersions.length > 0 ? (
             visibleFavoriteVersions.map((version) => {
-              const showLtsBadge = isBlenderLtsVersion(version.version);
+              const showLtsBadge = isBlenderLtsVersion(version.version, blenderLtsReleaseLines);
 
               return (
                 <article className="home-card home-card-version" key={version.id}>

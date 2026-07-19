@@ -11,6 +11,7 @@ import {
   applyBlenderConfig,
   cancelBlenderReleaseInstall,
   getBlenderConfigs,
+  getBlenderLtsReleaseLines,
   getBlenderReleaseDownloads,
   getLauncherState,
   getRecentProjects,
@@ -66,6 +67,7 @@ describe("api wrappers", () => {
     await getRunningBlenderLogs("instance-1");
     await stopRunningBlender("instance-1");
     await openVersionLocation("version-1");
+    await getBlenderLtsReleaseLines();
     await getBlenderReleaseDownloads();
     await installBlenderRelease(installPayload);
     await cancelBlenderReleaseInstall("release-1");
@@ -91,6 +93,7 @@ describe("api wrappers", () => {
       ["get_running_blender_logs", { instanceId: "instance-1" }],
       ["stop_running_blender", { instanceId: "instance-1" }],
       ["open_version_location", { id: "version-1" }],
+      ["get_blender_lts_release_lines"],
       ["get_blender_release_downloads"],
       ["install_blender_release", { request: installPayload }],
       ["cancel_blender_release_install", { id: "release-1" }],
