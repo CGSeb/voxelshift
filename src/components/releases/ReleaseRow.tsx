@@ -7,6 +7,7 @@ import { Tooltip } from "../Tooltip";
 interface ReleaseRowProps {
   download: BlenderReleaseDownload;
   favoriteReleaseValues: string[];
+  blenderLtsReleaseLines: string[];
   installStatuses: Record<string, BlenderReleaseInstallProgress>;
   installedReleaseVersions: Map<string, BlenderVersion>;
   isCurrentPlatformList: boolean;
@@ -69,6 +70,7 @@ function getChannelChipClassName(channel: string, isExperimentalList: boolean) {
 export function ReleaseRow({
   download,
   favoriteReleaseValues,
+  blenderLtsReleaseLines,
   installStatuses,
   installedReleaseVersions,
   isCurrentPlatformList,
@@ -86,7 +88,7 @@ export function ReleaseRow({
   const installedVersion = isCurrentPlatformList ? installedReleaseVersions.get(download.version) : undefined;
   const isInstalled = Boolean(installedVersion);
   const installStatus = isCurrentPlatformList ? installStatuses[download.id] : undefined;
-  const showLtsBadge = !isExperimentalList && isBlenderLtsVersion(download.version);
+  const showLtsBadge = !isExperimentalList && isBlenderLtsVersion(download.version, blenderLtsReleaseLines);
   const isInstalling = installStatus ? activeInstallPhases.includes(installStatus.phase) : false;
   const showInstallStatus = Boolean(installStatus) && installStatus?.phase !== "completed";
   const showProgressBar = installStatus ? activeInstallPhases.includes(installStatus.phase) : false;

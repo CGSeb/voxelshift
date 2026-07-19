@@ -2,20 +2,26 @@ import { describe, expect, it } from "vitest";
 import { isBlenderLtsVersion } from "./blenderVersions";
 
 describe("isBlenderLtsVersion", () => {
-  it("recognizes current Blender LTS release lines", () => {
-    expect(isBlenderLtsVersion("3.6.18")).toBe(true);
-    expect(isBlenderLtsVersion("4.2.3")).toBe(true);
-    expect(isBlenderLtsVersion("4.5.0")).toBe(true);
+  it("recognizes versions from fetched Blender LTS release lines", () => {
+    const ltsReleaseLines = ["3.6", "4.2", "4.5"];
+
+    expect(isBlenderLtsVersion("3.6.18", ltsReleaseLines)).toBe(true);
+    expect(isBlenderLtsVersion("4.2.3", ltsReleaseLines)).toBe(true);
+    expect(isBlenderLtsVersion("4.5.0", ltsReleaseLines)).toBe(true);
   });
 
   it("rejects non-LTS release lines", () => {
-    expect(isBlenderLtsVersion("4.1.1")).toBe(false);
-    expect(isBlenderLtsVersion("4.4.0")).toBe(false);
+    const ltsReleaseLines = ["4.2"];
+
+    expect(isBlenderLtsVersion("4.1.1", ltsReleaseLines)).toBe(false);
+    expect(isBlenderLtsVersion("4.4.0", ltsReleaseLines)).toBe(false);
   });
 
   it("handles empty or malformed values safely", () => {
-    expect(isBlenderLtsVersion(null)).toBe(false);
-    expect(isBlenderLtsVersion(undefined)).toBe(false);
-    expect(isBlenderLtsVersion("daily-main")).toBe(false);
+    const ltsReleaseLines = ["4.2"];
+
+    expect(isBlenderLtsVersion(null, ltsReleaseLines)).toBe(false);
+    expect(isBlenderLtsVersion(undefined, ltsReleaseLines)).toBe(false);
+    expect(isBlenderLtsVersion("daily-main", ltsReleaseLines)).toBe(false);
   });
 });

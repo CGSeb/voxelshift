@@ -120,6 +120,10 @@ export function openVersionLocation(id: string) {
   return invoke<void>("open_version_location", { id });
 }
 
+export function getBlenderLtsReleaseLines() {
+  return invoke<string[]>("get_blender_lts_release_lines");
+}
+
 export function getBlenderReleaseDownloads() {
   return invoke<BlenderReleaseListing>("get_blender_release_downloads");
 }

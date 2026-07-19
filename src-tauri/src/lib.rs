@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 #[cfg(target_os = "linux")]
@@ -31,6 +31,7 @@ const BLENDER_EXECUTABLE_NAME: &str = "blender.exe";
 #[cfg(target_os = "linux")]
 const BLENDER_EXECUTABLE_NAME: &str = "blender";
 const BLENDER_RELEASE_INDEX_URL: &str = "https://download.blender.org/release/";
+const BLENDER_RELEASES_PAGE_URL: &str = "https://www.blender.org/download/releases/";
 const BLENDER_DAILY_BUILDS_URL: &str = "https://builder.blender.org/download/daily/";
 const BLENDER_BUILDER_CDN_URL: &str = "https://cdn.builder.blender.org/";
 const RELEASE_INSTALL_EVENT: &str = "release-install-progress";
@@ -549,6 +550,7 @@ pub fn run() {
             pick_planner_blender_executable,
             pick_planner_output_folder,
             open_version_location,
+            get_blender_lts_release_lines,
             get_blender_release_downloads,
             install_blender_release,
             cancel_blender_release_install
@@ -836,6 +838,21 @@ async fn get_blender_release_downloads() -> Result<BlenderReleaseListing, String
         experimental_groups,
         experimental_error,
     })
+}
+
+#[tauri::command]
+async fn get_blender_lts_release_lines() -> Result<Vec<String>, String> {
+    let client = reqwest::Client::new();
+    let body = fetch_text(&client, BLENDER_RELEASES_PAGE_URL).await?;
+    let lines = parse_blender_lts_release_lines(&body);
+
+    if lines.is_empty() {
+        return Err(format!(
+            "No Blender LTS release lines were found at {BLENDER_RELEASES_PAGE_URL}."
+        ));
+    }
+
+    Ok(lines)
 }
 
 #[tauri::command]
@@ -1674,6 +1691,59 @@ fn parse_blender_release_channels(body: &str) -> Vec<BlenderReleaseChannel> {
     let mut channels: Vec<BlenderReleaseChannel> = releases.into_values().collect();
     channels.sort_by(|left, right| compare_version_values(&right.version, &left.version));
     channels
+}
+
+fn parse_blender_lts_release_lines(body: &str) -> Vec<String> {
+    let text = html_text_content(body);
+    let mut release_lines = BTreeSet::<String>::new();
+    let mut remainder = text.as_str();
+    const MARKER: &str = "Blender ";
+
+    while let Some(start) = remainder.find(MARKER) {
+        let after_marker = &remainder[start + MARKER.len()..];
+        let Some(version_token) = after_marker.split_whitespace().next() else {
+            break;
+        };
+
+        let release_line = version_token.trim_matches(|character: char| {
+            !character.is_ascii_digit() && character != '.'
+        });
+
+        if is_major_minor_release(release_line) {
+            let after_version = after_marker[version_token.len()..].trim_start();
+            if after_version.starts_with("LTS") {
+                release_lines.insert(release_line.to_string());
+            }
+        }
+
+        remainder = &after_marker[version_token.len()..];
+    }
+
+    let mut release_lines = release_lines.into_iter().collect::<Vec<_>>();
+    release_lines.sort_by(|left, right| compare_version_values(right, left));
+    release_lines
+}
+
+fn html_text_content(body: &str) -> String {
+    let mut text = String::with_capacity(body.len());
+    let mut is_in_tag = false;
+
+    for character in body.chars() {
+        match character {
+            '<' => {
+                is_in_tag = true;
+                text.push(' ');
+            }
+            '>' => {
+                is_in_tag = false;
+                text.push(' ');
+            }
+            _ if !is_in_tag => text.push(character),
+            _ => {}
+        }
+    }
+
+    normalize_whitespace(&decode_html_entities(&text))
 }
 
 fn parse_release_channel_href(href: &str) -> Option<BlenderReleaseChannel> {
@@ -3761,6 +3831,29 @@ mod tests {
             "https://download.blender.org/release/Blender4.2/"
         );
         assert!(parse_release_channel_href("#ignored").is_none());
+    }
+
+    #[test]
+    fn parses_lts_release_lines_from_blender_releases_page_html() {
+        let body = r#"
+            <section>
+              <h2>4 Series | 2023 &ndash; 2025</h2>
+              <h3>Blender&nbsp;4.5&nbsp;LTS</h3>
+              <h3>Blender 4.4</h3>
+              <h3>Blender 4.2 LTS</h3>
+              <h3>Blender 4.2 LTS</h3>
+              <h3>Blender 4.2.1 LTS</h3>
+              <h3>Blender 3.6 LTS</h3>
+              <p>Blender Foundation supports LTS releases for production.</p>
+              <h3>Blender 3.3 LTS</h3>
+              <h3>Blender 2.93 LTS</h3>
+            </section>
+        "#;
+
+        assert_eq!(
+            parse_blender_lts_release_lines(body),
+            vec!["4.5", "4.2", "3.6", "3.3", "2.93"]
+        );
     }
 
     #[test]
