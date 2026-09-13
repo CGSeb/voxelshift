@@ -3,6 +3,9 @@ import type {
   BlenderConfigProfile,
   BlenderLogEntry,
   BlenderReleaseListing,
+  InstallMigration,
+  InstallMigrationFolders,
+  InstallMigrationLink,
   LauncherState,
   PlannerLogEntry,
   PlannerRunSummary,
@@ -30,6 +33,7 @@ interface InstallReleasePayload {
   version: string;
   fileName: string;
   url: string;
+  migration?: InstallMigration;
 }
 
 interface SaveBlenderConfigPayload {
@@ -130,6 +134,18 @@ export function getBlenderReleaseDownloads() {
 
 export function installBlenderRelease(payload: InstallReleasePayload) {
   return invoke<LauncherState>("install_blender_release", { request: payload });
+}
+
+export function getInstallMigrationFolders(versionId: string) {
+  return invoke<InstallMigrationFolders>("get_install_migration_folders", { versionId });
+}
+
+export function pickInstallMigrationFolder() {
+  return invoke<string | null>("pick_install_migration_folder");
+}
+
+export function getInstallMigrationLinks(extensionsPath: string | null) {
+  return invoke<InstallMigrationLink[]>("get_install_migration_links", { extensionsPath });
 }
 
 export function cancelBlenderReleaseInstall(id: string) {

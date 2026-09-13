@@ -71,6 +71,23 @@ export interface BlenderConfigProfile {
   updatedAt: number;
 }
 
+export interface InstallMigrationFolders {
+  settingsPath: string | null;
+  extensionsPath: string | null;
+  addonsPath: string | null;
+}
+
+export interface InstallMigration extends InstallMigrationFolders {
+  extensionMode: "copy" | "symlink";
+  extensionOverrides?: (Pick<InstallMigrationLink, "linkPath" | "targetPath"> & { mode?: "copy" | "symlink" })[];
+}
+
+export interface InstallMigrationLink {
+  name: string;
+  linkPath: string;
+  targetPath: string;
+}
+
 export type BlenderLogSource = "stdout" | "stderr" | "system";
 
 export interface RunningBlenderProcess {

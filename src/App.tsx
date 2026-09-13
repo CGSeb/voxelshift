@@ -6,6 +6,7 @@ import { BlenderLogsDialog } from "./components/BlenderLogsDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { PlannerLogsDialog } from "./components/PlannerLogsDialog";
 import { ReleaseConfigDialog } from "./components/releases/ReleaseConfigDialog";
+import { InstallMigrationDialog } from "./components/releases/InstallMigrationDialog";
 import { AppFooter } from "./components/layout/AppFooter";
 import { AppLayout } from "./components/layout/AppLayout";
 import { RunningBlenderTray } from "./components/layout/RunningBlenderTray";
@@ -52,6 +53,7 @@ import type {
   BlenderSession,
   BlenderVersion,
   LauncherState,
+  InstallMigration,
   PlannerLogEntry,
   PlannerLogEvent,
   PlannerRunSummary,
@@ -314,6 +316,7 @@ export default function App() {
   const [removeRecentProjectError, setRemoveRecentProjectError] = useState<string | null>(null);
   const [favoriteReleaseValues, setFavoriteReleaseValues] = useState<string[]>(() => readFavoriteReleaseValues());
   const [pendingUninstallDownload, setPendingUninstallDownload] = useState<BlenderReleaseDownload | null>(null);
+  const [pendingInstallDownload, setPendingInstallDownload] = useState<BlenderReleaseDownload | null>(null);
   const [isRemovingVersion, setIsRemovingVersion] = useState(false);
   const [removeVersionError, setRemoveVersionError] = useState<string | null>(null);
   const [activeConfigVersion, setActiveConfigVersion] = useState<BlenderVersion | null>(null);
@@ -847,7 +850,8 @@ export default function App() {
     });
   }
 
-  async function installRelease(download: BlenderReleaseDownload) {
+  async function installRelease(download: BlenderReleaseDownload, migration?: InstallMigration) {
+    setPendingInstallDownload(null);
     setInstallStatuses((current) => ({
       ...current,
       [download.id]: {
@@ -868,6 +872,7 @@ export default function App() {
         version: download.version,
         fileName: download.fileName,
         url: download.url,
+        ...(migration ? { migration } : {}),
       });
 
       setLauncherState(nextLauncherState);
@@ -1628,7 +1633,7 @@ export default function App() {
             installStatuses={installStatuses}
             installedReleaseVersions={installedReleaseVersions}
             onRefresh={() => void refreshReleasePageData()}
-            onInstall={(download) => void installRelease(download)}
+            onInstall={setPendingInstallDownload}
             onCancelInstall={(download) => void cancelInstall(download)}
             onLaunchVersion={(version) => void launchInstalledRelease(version)}
             onOpenConfigs={(version, mode) => void openConfigDialog(version, mode)}
@@ -1666,6 +1671,15 @@ export default function App() {
         logs={activePlannerLogsRun ? plannerLogsByRunId[activePlannerLogsRun.id] ?? [] : []}
         onClose={closePlannerLogs}
       />
+
+      {pendingInstallDownload ? (
+        <InstallMigrationDialog
+          download={pendingInstallDownload}
+          versions={launcherState?.versions ?? []}
+          onInstall={(migration) => void installRelease(pendingInstallDownload, migration)}
+          onClose={() => setPendingInstallDownload(null)}
+        />
+      ) : null}
 
       <ReleaseConfigDialog
         open={activeConfigVersion !== null && activeConfigDialogMode !== null}

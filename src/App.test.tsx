@@ -1,4 +1,4 @@
-﻿import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
@@ -37,6 +37,9 @@ const apiMocks = vi.hoisted(() => ({
   getRunningBlenderLogs: vi.fn(),
   getRunningBlenders: vi.fn(),
   installBlenderRelease: vi.fn(),
+  getInstallMigrationFolders: vi.fn(),
+  getInstallMigrationLinks: vi.fn(),
+  pickInstallMigrationFolder: vi.fn(),
   launchBlender: vi.fn(),
   launchBlenderProject: vi.fn(),
   pickPlannerBlendFile: vi.fn(),
@@ -268,6 +271,8 @@ describe("App", () => {
     apiMocks.removeBlenderConfig.mockResolvedValue(undefined);
     apiMocks.stopRunningBlender.mockResolvedValue(undefined);
     apiMocks.installBlenderRelease.mockResolvedValue(launcherState);
+    apiMocks.getInstallMigrationFolders.mockResolvedValue({ settingsPath: "D:/previous/portable/config", extensionsPath: "D:/previous/portable/extensions", addonsPath: null });
+    apiMocks.getInstallMigrationLinks.mockResolvedValue([]);
     apiMocks.cancelBlenderReleaseInstall.mockResolvedValue(undefined);
     apiMocks.launchBlender.mockResolvedValue(launcherState);
     apiMocks.launchBlenderProject.mockResolvedValue(launcherState);
@@ -358,6 +363,8 @@ describe("App", () => {
     await screen.findByText("Stable builds for Windows x64");
 
     fireEvent.click(screen.getByRole("button", { name: "Install" }));
+    expect(apiMocks.installBlenderRelease).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Install fresh" }));
 
     await screen.findByText("Download failed");
   });
@@ -395,6 +402,7 @@ describe("App", () => {
 
     const pendingReleaseRow = screen.getByText("4.3.0").closest("article") as HTMLElement;
     fireEvent.click(within(pendingReleaseRow).getByRole("button", { name: "Install" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Install fresh" }));
 
     await waitFor(() => {
       expect(within(pendingReleaseRow).queryByText("Could not install Blender 4.3.0.")).not.toBeInTheDocument();
@@ -781,6 +789,10 @@ describe("App", () => {
 
     const experimentalRow = await screen.findByText("4.4.0").then((element) => element.closest("article") as HTMLElement);
     fireEvent.click(within(experimentalRow).getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Install with selected setup" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Advanced: choose folders" }));
+    fireEvent.click(screen.getByRole("button", { name: "Symlink" }));
+    fireEvent.click(screen.getByRole("button", { name: "Install with selected setup" }));
 
     await waitFor(() => {
       expect(apiMocks.installBlenderRelease).toHaveBeenCalledWith({
@@ -788,6 +800,7 @@ describe("App", () => {
         version: experimentalDownload.version,
         fileName: experimentalDownload.fileName,
         url: experimentalDownload.url,
+        migration: { settingsPath: "D:/previous/portable/config", extensionsPath: "D:/previous/portable/extensions", addonsPath: null, extensionMode: "symlink" },
       });
     });
 
