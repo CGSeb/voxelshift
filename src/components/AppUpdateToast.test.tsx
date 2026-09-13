@@ -33,6 +33,8 @@ describe("AppUpdateToast", () => {
     expect(screen.getByText("Voxel Shift 1.1.0 is ready")).toBeInTheDocument();
     expect(screen.getByText(/v1.0.0 -> v1.1.0/)).toBeInTheDocument();
     expect(screen.getByText("Fresh fixes and polish.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What's new" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Release notes" })).toHaveTextContent(updateInfo.body);
 
     fireEvent.click(screen.getByRole("button", { name: "Update now" }));
     fireEvent.click(screen.getByRole("button", { name: "Later" }));
@@ -41,11 +43,11 @@ describe("AppUpdateToast", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("hides the generic github release body from the update popup", () => {
+  it.each([undefined, "", " \n ", "See the assets to download and install this version."])("hides empty or placeholder release notes (%s)", (body) => {
     render(
       <AppUpdateToast
         phase="available"
-        updateInfo={{ ...updateInfo, body: "See the assets to download and install this version." }}
+        updateInfo={{ ...updateInfo, body }}
         errorMessage={null}
         progressPercent={null}
         downloadedBytes={0}
@@ -58,6 +60,19 @@ describe("AppUpdateToast", () => {
     );
 
     expect(screen.queryByText("See the assets to download and install this version.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Release notes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "What's new" })).not.toBeInTheDocument();
+  });
+
+  it("preserves multiline notes as safe text in a keyboard accessible scroll area", () => {
+    const body = '- Copy settings from the previous version.\n- Extensions: amélioration.\n<script>alert("test")</script>';
+    render(<AppUpdateToast phase="available" updateInfo={{ ...updateInfo, body }}
+      errorMessage={null} progressPercent={null} downloadedBytes={0} totalBytes={null}
+      actionLabel="Update now" canDismiss onInstallUpdate={vi.fn()} onClose={vi.fn()} />);
+    const notes = screen.getByRole("region", { name: "Release notes" });
+    expect(notes.textContent).toBe(body);
+    expect(notes).toHaveAttribute("tabindex", "0");
+    expect(notes.querySelector("script")).toBeNull();
   });
 
   it("shows progress details while downloading and locks dismissal during install", () => {
@@ -80,6 +95,7 @@ describe("AppUpdateToast", () => {
     expect(screen.getByText("256 B of 1.00 KB downloaded.")).toBeInTheDocument();
     expect(screen.getByText("25% downloaded")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Dismiss update toast" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Release notes" })).not.toBeInTheDocument();
   });
 
   it("renders installing progress with invalid dates and zero-byte totals", () => {

@@ -26,6 +26,22 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Read release notes
+        id: release-notes
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const fs = require('node:fs');
+            const { version } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (context.ref !== `refs/tags/v${version}`) {
+              throw new Error('The release tag must match the app version in package.json.');
+            }
+            const path = `release-notes/${version}.md`;
+            const notes = fs.readFileSync(path, 'utf8').trim();
+            if (!notes) throw new Error(`Add release notes to ${path} before releasing.`);
+            return notes;
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux dependencies
@@ -49,6 +65,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: v__VERSION__
+          releaseBody: ${{ steps.release-notes.outputs.result }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

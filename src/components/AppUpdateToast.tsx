@@ -129,7 +129,12 @@ export function AppUpdateToast({
           <p className={phase === "failed" ? "app-toast-message app-toast-message-error" : "app-toast-message"}>{message}</p>
 
           {releaseNotes && phase !== "failed" && phase !== "downloading" && phase !== "installing" ? (
-            <p className="app-toast-notes">{releaseNotes}</p>
+            <section className="app-toast-release-notes" aria-labelledby="app-update-notes-title">
+              <h4 id="app-update-notes-title">What's new</h4>
+              <div className="app-toast-notes" role="region" aria-label="Release notes" tabIndex={0}>
+                {releaseNotes}
+              </div>
+            </section>
           ) : null}
 
           {showProgress ? (

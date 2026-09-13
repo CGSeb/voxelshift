@@ -368,4 +368,80 @@ describe("PlannerPage", () => {
     expect(within(modal).getByText("No installed Blender versions found")).toBeInTheDocument();
     expect(within(modal).getByRole("button", { name: "Schedule render" })).toBeDisabled();
   });
+
+  it("rejects blank frame numbers and preserves manually entered values when pickers are canceled", async () => {
+    const props = createDefaultProps();
+    props.onBrowseBlendFile.mockResolvedValueOnce("D:/picked.blend").mockResolvedValueOnce(null);
+    render(<PlannerPage {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+    const modal = screen.getByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Browse blend file" }));
+    await waitFor(() => expect(screen.getByLabelText("Blend file")).toHaveValue("D:/picked.blend"));
+    fireEvent.click(screen.getByRole("button", { name: "Browse blend file" }));
+    await waitFor(() => expect(props.onBrowseBlendFile).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText("Blend file")).toHaveValue("D:/picked.blend");
+    fireEvent.change(screen.getByLabelText("Start frame"), { target: { value: "" } });
+    fireEvent.submit(modal.querySelector("form")!);
+    expect(screen.getByText("Please enter valid frame numbers.")).toBeInTheDocument();
+    expect(props.onCreateRun).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Start frame"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("End frame"), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("tab", { name: "Custom build" }));
+    fireEvent.change(screen.getByLabelText("Custom Blender executable"), { target: { value: "D:/custom/blender.exe" } });
+    fireEvent.click(screen.getByRole("button", { name: "Browse custom Blender executable" }));
+    await waitFor(() => expect(props.onBrowseCustomBlender).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText("Custom Blender executable")).toHaveValue("D:/custom/blender.exe");
+    fireEvent.click(screen.getByRole("tab", { name: "Library" }));
+    fireEvent.click(screen.getByLabelText("Override output folder"));
+    fireEvent.change(screen.getByLabelText("Output folder"), { target: { value: " D:/renders " } });
+    fireEvent.click(screen.getByRole("button", { name: "Browse output folder" }));
+    await waitFor(() => expect(props.onBrowseOutputFolder).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText("Output folder")).toHaveValue(" D:/renders ");
+    fireEvent.click(screen.getByRole("button", { name: "Schedule render" }));
+    await waitFor(() => expect(props.onCreateRun).toHaveBeenCalledWith(expect.objectContaining({
+      startFrame: 3, endFrame: 12, blendFilePath: "D:/picked.blend", outputFolderPath: "D:/renders",
+      blender: { source: "library", versionId: primaryVersion.id, executablePath: null },
+    })));
+  });
+
+  it("keeps edits after a failed save and duplicates custom Blender and output preferences", async () => {
+    const props = createDefaultProps();
+    props.onUpdateRun.mockResolvedValue(false);
+    const customRun: PlannerRunSummary = { ...pendingRun, outputFolderPath: "D:/renders", blenderTarget: {
+      source: "custom", versionId: null, displayName: "Custom", executablePath: "D:/custom/blender.exe",
+    } };
+    render(<PlannerPage {...props} plannerRuns={[customRun]} submitErrorMessage="Could not save render" />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit pending-scene.blend" }));
+    expect(screen.getByLabelText("Custom Blender executable")).toHaveValue("D:/custom/blender.exe");
+    expect(screen.getByLabelText("Output folder")).toHaveValue("D:/renders");
+    fireEvent.change(screen.getByLabelText("End frame"), { target: { value: "42" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(props.onUpdateRun).toHaveBeenCalledWith(customRun.id, expect.objectContaining({endFrame: 42})));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByLabelText("End frame")).toHaveValue(42);
+    expect(screen.getByText("Could not save render")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Duplicate pending-scene.blend" }));
+    expect(screen.getByLabelText("End frame")).toHaveValue(customRun.endFrame);
+    fireEvent.click(screen.getByRole("button", { name: "Schedule render" }));
+    await waitFor(() => expect(props.onCreateRun).toHaveBeenCalledWith(expect.objectContaining({
+      outputFolderPath: "D:/renders", blender: { source: "custom", versionId: null, executablePath: "D:/custom/blender.exe" },
+    })));
+  });
+
+  it("navigates the calendar backward and ignores empty time edits", () => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-03-29T10:00:00").getTime());
+    render(<PlannerPage {...createDefaultProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Schedule" }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose start time" }));
+    const picker = screen.getByRole("dialog", { name: "Start time picker" });
+    fireEvent.mouseDown(picker);
+    expect(picker).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show previous month" }));
+    fireEvent.click(screen.getByRole("button", { name: formatDayLabel(new Date(2026, 1, 15)) }));
+    fireEvent.change(screen.getByLabelText("Hour"), { target: { value: "" } });
+    expect(screen.getByLabelText("Hour")).toHaveValue(10);
+    fireEvent.click(screen.getByRole("tab", { name: "Custom build" }));
+    expect(screen.queryByRole("dialog", { name: "Start time picker" })).not.toBeInTheDocument();
+  });
 });

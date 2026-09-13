@@ -22,6 +22,7 @@ use tauri::{
 use std::os::windows::process::CommandExt;
 
 mod planner;
+mod migration;
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
@@ -218,6 +219,7 @@ struct InstallReleaseRequest {
     version: String,
     file_name: String,
     url: String,
+    migration: Option<migration::InstallMigration>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -549,6 +551,9 @@ pub fn run() {
             pick_planner_blend_file,
             pick_planner_blender_executable,
             pick_planner_output_folder,
+            get_install_migration_folders,
+            get_install_migration_links,
+            pick_install_migration_folder,
             open_version_location,
             get_blender_lts_release_lines,
             get_blender_release_downloads,
@@ -859,9 +864,12 @@ async fn get_blender_lts_release_lines() -> Result<Vec<String>, String> {
 async fn install_blender_release(
     app: AppHandle,
     control: tauri::State<'_, ReleaseInstallControl>,
-    request: InstallReleaseRequest,
+    mut request: InstallReleaseRequest,
 ) -> Result<LauncherState, String> {
     validate_install_request(&request)?;
+    if let Some(migration) = &mut request.migration {
+        migration.validate()?;
+    }
 
     let existing_state = build_launcher_state(&app)?;
     if existing_state.versions.iter().any(|version| {
@@ -990,6 +998,41 @@ async fn install_blender_release(
 
     let _ = control.finish(&request.id);
     install_result
+}
+
+#[tauri::command]
+fn get_install_migration_folders(
+    app: AppHandle,
+    version_id: String,
+) -> Result<migration::MigrationFolders, String> {
+    let state = build_launcher_state(&app)?;
+    let version = state.versions.iter()
+        .find(|version| version.id == version_id && version.available)
+        .ok_or_else(|| "The previous Blender installation is no longer available.".to_string())?;
+    Ok(migration::discover(
+        Path::new(&version.install_dir),
+        version.version.as_deref(),
+    ))
+}
+
+#[tauri::command]
+async fn pick_install_migration_folder() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        planner::pick_windows_folder("Select migration source folder")
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_install_migration_links(
+    extensions_path: Option<String>,
+) -> Result<Vec<migration::MigrationLink>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        migration::preview_links(extensions_path.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2687,7 +2730,25 @@ async fn extract_release_archive<E: ReleaseInstallProgressEmitter>(
             return Err(INSTALL_CANCELED_MESSAGE.to_string());
         }
 
-        finalize_extracted_release(&request, &extraction_dir, &stable_dir)
+        if request.migration.is_some() {
+            emit_release_install_progress(&app, ReleaseInstallProgress {
+                release_id: request.id.clone(),
+                phase: "extracting".to_string(),
+                progress_percent: None,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                speed_bytes_per_second: None,
+                install_dir: None,
+                message: "Transferring settings and extensions...".to_string(),
+            });
+        }
+        finalize_extracted_release_checked(&request, &extraction_dir, &stable_dir, &|| {
+            if control.is_cancel_requested(&request.id)? {
+                Err(INSTALL_CANCELED_MESSAGE.to_string())
+            } else {
+                Ok(())
+            }
+        })
     })
     .await
     .map_err(|error| format!("Failed to finish the Blender install: {error}"))?
@@ -2845,10 +2906,20 @@ fn extract_tar_xz_release_archive<E: ReleaseInstallProgressEmitter>(
     }
 }
 
+#[cfg(test)]
 fn finalize_extracted_release(
     request: &InstallReleaseRequest,
     extraction_dir: &Path,
     stable_dir: &Path,
+) -> Result<PathBuf, String> {
+    finalize_extracted_release_checked(request, extraction_dir, stable_dir, &|| Ok(()))
+}
+
+fn finalize_extracted_release_checked(
+    request: &InstallReleaseRequest,
+    extraction_dir: &Path,
+    stable_dir: &Path,
+    check_canceled: &dyn Fn() -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let mut top_level_entries = fs::read_dir(extraction_dir)
         .map_err(|error| format!("Unable to read the extracted files: {error}"))?
@@ -2877,6 +2948,11 @@ fn finalize_extracted_release(
             path_to_string(&final_install_dir)
         ));
     }
+
+    if let Some(migration) = &request.migration {
+        migration.apply_checked(&archive_root, check_canceled)?;
+    }
+    check_canceled()?;
 
     if archive_root == extraction_dir {
         fs::rename(extraction_dir, &final_install_dir).map_err(|error| {
@@ -4407,6 +4483,7 @@ mod tests {
         let platform =
             current_release_platform().expect("current platform should be supported in tests");
         let request = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: format!("blender-4.2.3{}", platform.file_suffix),
@@ -4433,6 +4510,7 @@ mod tests {
         };
 
         let missing_url = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: format!("blender-4.2.3{}", platform.file_suffix),
@@ -4444,6 +4522,7 @@ mod tests {
         );
 
         let missing_file_name = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: String::new(),
@@ -4455,6 +4534,7 @@ mod tests {
         );
 
         let unofficial = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: format!("blender-4.2.3{}", platform.file_suffix),
@@ -4469,6 +4549,7 @@ mod tests {
         );
 
         let wrong_platform = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: format!("blender-4.2.3{wrong_suffix}"),
@@ -4621,6 +4702,7 @@ mod tests {
         fs::write(extraction_dir.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
 
         let request = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: format!(
@@ -4640,6 +4722,7 @@ mod tests {
         fs::write(nested_root.join(BLENDER_EXECUTABLE_NAME), b"").unwrap();
 
         let nested_request = InstallReleaseRequest {
+            migration: None,
             id: "release-2".to_string(),
             version: "4.3.0".to_string(),
             file_name: format!(
@@ -4666,6 +4749,7 @@ mod tests {
         fs::create_dir_all(&stable_dir).unwrap();
 
         let request = InstallReleaseRequest {
+            migration: None,
             id: "release-1".to_string(),
             version: "4.2.3".to_string(),
             file_name: format!(
@@ -5259,11 +5343,39 @@ mod tests {
 
     fn make_install_request(id: &str, file_name: &str, url: &str) -> InstallReleaseRequest {
         InstallReleaseRequest {
+            migration: None,
             id: id.to_string(),
             version: "4.2.3".to_string(),
             file_name: file_name.to_string(),
             url: url.to_string(),
         }
+    }
+
+    #[test]
+    fn migration_failure_or_cancellation_does_not_publish_the_install() {
+        let sandbox = TestDir::new("migration-staging");
+        let stable = sandbox.path().join("stable");
+        let extracted = sandbox.path().join("extract");
+        fs::create_dir_all(&stable).unwrap();
+        fs::create_dir_all(&extracted).unwrap();
+        fs::write(extracted.join(BLENDER_EXECUTABLE_NAME), b"blender").unwrap();
+        let mut request = make_install_request("migration", "blender.zip", "https://download.blender.org/blender.zip");
+        request.migration = Some(migration::InstallMigration {
+            extension_overrides: Vec::new(),
+            settings_path: Some(path_to_string(&sandbox.path().join("missing"))),
+            extensions_path: None,
+            addons_path: None,
+            extension_mode: migration::ExtensionMode::Copy,
+        });
+        assert!(finalize_extracted_release(&request, &extracted, &stable).is_err());
+        assert_eq!(fs::read_dir(&stable).unwrap().count(), 0);
+        assert!(extracted.join(BLENDER_EXECUTABLE_NAME).exists());
+        request.migration = None;
+        assert_eq!(
+            finalize_extracted_release_checked(&request, &extracted, &stable, &|| Err(INSTALL_CANCELED_MESSAGE.to_string())),
+            Err(INSTALL_CANCELED_MESSAGE.to_string())
+        );
+        assert_eq!(fs::read_dir(&stable).unwrap().count(), 0);
     }
 
     #[derive(Clone, Default)]
@@ -5337,6 +5449,52 @@ mod tests {
         server.join().unwrap();
 
         assert_eq!(fs::read(&archive_path).unwrap(), request_body);
+    }
+
+    #[test]
+    fn download_errors_preserve_existing_files_and_report_invalid_destinations() {
+        let sandbox = TestDir::new("download-errors");
+        let archive = sandbox.path().join("download.zip");
+        fs::write(&archive, b"existing archive").unwrap();
+        let app = TestProgressEmitter::default();
+        let control = ReleaseInstallControl::default();
+        let (url, server) = start_test_http_server("503 Service Unavailable", b"offline");
+        let mut request = make_install_request("download-error", "blender.zip", &url);
+        let error = tauri::async_runtime::block_on(download_release_archive(&app, &control, &request, &archive)).unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("unexpected status: 503"));
+        assert_eq!(fs::read(&archive).unwrap(), b"existing archive");
+
+        request.url = "not a valid URL".to_string();
+        let error = tauri::async_runtime::block_on(download_release_archive(&app, &control, &request, &archive)).unwrap_err();
+        assert!(error.contains("Could not start the Blender download"));
+        assert_eq!(fs::read(&archive).unwrap(), b"existing archive");
+
+        let (url, server) = start_test_http_server("200 OK", b"archive");
+        request.url = url;
+        let missing_parent = sandbox.path().join("missing/download.zip");
+        let error = tauri::async_runtime::block_on(download_release_archive(&app, &control, &request, &missing_parent)).unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("Unable to create the temporary download file"));
+        assert!(!missing_parent.exists());
+    }
+
+    #[test]
+    fn canceled_downloads_stop_before_writing_and_also_handle_empty_responses() {
+        let sandbox = TestDir::new("download-cancel");
+        let app = TestProgressEmitter::default();
+        for body in [b"archive bytes".as_slice(), b"".as_slice()] {
+            let (url, server) = start_test_http_server("200 OK", body);
+            let request = make_install_request("canceled", "blender.zip", &url);
+            let control = ReleaseInstallControl::default();
+            control.begin(&request.id).unwrap();
+            assert!(control.request_cancel(&request.id).unwrap());
+            let archive = sandbox.path().join("canceled.zip");
+            let result = tauri::async_runtime::block_on(download_release_archive(&app, &control, &request, &archive));
+            server.join().unwrap();
+            assert_eq!(result, Err(INSTALL_CANCELED_MESSAGE.to_string()));
+            assert_eq!(fs::metadata(&archive).unwrap().len(), 0);
+        }
     }
 
     #[test]

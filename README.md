@@ -26,6 +26,12 @@ It is aimed at artists and technical users who keep multiple Blender installs ar
 - favorite Blender versions with launch shortcuts
 - version status badges such as `Default` and `LTS`
 
+### Installing a version
+
+The install dialog lets you transfer a previous Blender setup or install fresh. Settings and legacy add-ons from the selected version are copied automatically when available. **Copy** automatically uses the selected previous version's extensions folder without showing a folder control. **Symlink** provides a separate editable folder for each installed extension. Symlink folder choices persist while toggling modes; switching the previous version resets them. Files go into the new installation's `portable/config`, `portable/extensions`, and `portable/scripts/addons` folders.
+
+In Advanced options, choose **Copy** or **Symlink** for each extension, or change the default toggle to reset all extensions to one method. Copies always use the previous version's extension folder; linked extensions can each use a custom source folder. Settings and legacy add-ons are always copied, and Voxel Shift's bundled extension stays independent. Linked extensions require their source folders to remain available, so keep those folders when uninstalling the previous version. Windows may require Developer Mode or administrator rights to create symlinks. Use **Copy** if symlink creation is unavailable.
+
 ## Tech Stack
 
 - Tauri 2
@@ -60,6 +66,14 @@ npm run build
 ```powershell
 npm run tauri build
 ```
+
+## Release notes
+
+Before pushing a version tag, add a short `release-notes/<version>.md` file (for example, `release-notes/1.5.0.md`) and commit it with the version bump. Use a few short paragraphs or `-` bullet points; the app displays the notes as plain text.
+
+The release workflow uses this file for both the GitHub release description and the updater's `latest.json` notes. The update popup shows them under **What's new**, with scrolling for longer notes. Missing or empty notes stop the release build. Review the notes before tagging, then publish the draft release after its builds finish.
+
+Editing only the GitHub release description afterward does not update the popup: it reads the notes bundled into `latest.json` during the release build.
 
 ## Repository Layout
 

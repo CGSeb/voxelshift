@@ -14,6 +14,9 @@ import {
   getBlenderLtsReleaseLines,
   getBlenderReleaseDownloads,
   getLauncherState,
+  getInstallMigrationFolders,
+  getInstallMigrationLinks,
+  pickInstallMigrationFolder,
   getRecentProjects,
   refreshManagedBlenderExtensions,
   getRunningBlenderLogs,
@@ -37,6 +40,29 @@ describe("api wrappers", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(undefined);
+  });
+
+  it("preserves migration choices and nullable folder results across the Tauri boundary", async () => {
+    const folders = { settingsPath: "D:/old/config", extensionsPath: "D:/old/extensions", addonsPath: null };
+    invokeMock.mockResolvedValueOnce(folders).mockResolvedValueOnce([]).mockResolvedValueOnce(null);
+    await expect(getInstallMigrationFolders("old")).resolves.toEqual(folders);
+    await expect(getInstallMigrationLinks(null)).resolves.toEqual([]);
+    await expect(pickInstallMigrationFolder()).resolves.toBeNull();
+    const request = {
+      id: "new", version: "5.2.1", fileName: "blender.zip", url: "https://download.blender.org/blender.zip",
+      migration: { ...folders, extensionMode: "copy" as const, extensionOverrides: [
+        { linkPath: "portable/extensions/blender_org/tool", targetPath: "D:/shared/tool", mode: "symlink" as const },
+      ] },
+    };
+    await installBlenderRelease(request);
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_install_migration_folders", { versionId: "old" }],
+      ["get_install_migration_links", { extensionsPath: null }],
+      ["pick_install_migration_folder"],
+      ["install_blender_release", { request }],
+    ]);
+    invokeMock.mockRejectedValueOnce(new Error("Previous version unavailable"));
+    await expect(getInstallMigrationFolders("missing")).rejects.toThrow("Previous version unavailable");
   });
 
   it("calls invoke with the expected command names and payloads", async () => {

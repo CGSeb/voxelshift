@@ -1289,7 +1289,7 @@ fn pick_windows_file(title: &str, filter: &str) -> Result<Option<String>, String
 }
 
 #[cfg(target_os = "windows")]
-fn pick_windows_folder(title: &str) -> Result<Option<String>, String> {
+pub(crate) fn pick_windows_folder(title: &str) -> Result<Option<String>, String> {
     let escaped_title = title.replace('\'', "''");
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms\n$dialog = New-Object System.Windows.Forms.FolderBrowserDialog\n$dialog.Description = '{escaped_title}'\n$dialog.ShowNewFolderButton = $true\nif ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Write($dialog.SelectedPath) }}"
@@ -1326,7 +1326,7 @@ fn pick_windows_file(_title: &str, _filter: &str) -> Result<Option<String>, Stri
 }
 
 #[cfg(not(target_os = "windows"))]
-fn pick_windows_folder(_title: &str) -> Result<Option<String>, String> {
+pub(crate) fn pick_windows_folder(_title: &str) -> Result<Option<String>, String> {
     Err("Folder picking is currently only available on Windows builds.".to_string())
 }
 
