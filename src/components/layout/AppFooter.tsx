@@ -1,7 +1,10 @@
 import { CheckCircle2, Download, LoaderCircle } from "lucide-react";
 import { Tooltip } from "../Tooltip";
+import { McpStatusButton } from "./McpStatusButton";
 
 interface AppFooterProps {
+  onOpenMcpSettings: () => void;
+  mcpRevision: number;
   appVersion: string | null;
   updateSummary: string;
   updateTone: "neutral" | "success" | "warning" | "danger";
@@ -15,6 +18,8 @@ interface AppFooterProps {
 }
 
 export function AppFooter({
+  onOpenMcpSettings,
+  mcpRevision,
   appVersion,
   updateSummary,
   updateTone,
@@ -40,7 +45,6 @@ export function AppFooter({
             </span>
           </Tooltip>
         ) : null}
-      </div>
 
       {!isUpToDate ? (
         <div className="app-footer-status-row">
@@ -56,9 +60,9 @@ export function AppFooter({
           </span>
           {updateVersion ? <span className="app-footer-target">Latest v{updateVersion}</span> : null}
         </div>
-      ) : (
-        <div className="app-footer-status-row" />
-      )}
+      ) : null}
+        <McpStatusButton onClick={onOpenMcpSettings} revision={mcpRevision} />
+      </div>
 
       <div className="app-footer-actions">
         {detailsLabel && onShowUpdateDetails ? (

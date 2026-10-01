@@ -4,6 +4,7 @@ import { useEffect, useEffectEvent, useState } from "react";
 import { AppUpdateToast } from "./components/AppUpdateToast";
 import { BlenderLogsDialog } from "./components/BlenderLogsDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { McpSettingsDialog } from "./components/McpSettingsDialog";
 import { PlannerLogsDialog } from "./components/PlannerLogsDialog";
 import { ReleaseConfigDialog } from "./components/releases/ReleaseConfigDialog";
 import { InstallMigrationDialog } from "./components/releases/InstallMigrationDialog";
@@ -301,10 +302,26 @@ function mergeBlenderSessions(currentSessions: BlenderSession[], runningProcesse
 }
 
 export default function App() {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mcpRevision, setMcpRevision] = useState(0);
   const [activePage, setActivePage] = useState<PageKey>("home");
   const [releaseListing, setReleaseListing] = useState<BlenderReleaseListing | null>(null);
   const [blenderLtsReleaseLines, setBlenderLtsReleaseLines] = useState<string[]>([]);
   const [launcherState, setLauncherState] = useState<LauncherState | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: UnlistenFn | undefined;
+    void listen<LauncherState>("launcher-state-updated", ({ payload }) => {
+      if (!disposed) setLauncherState(payload);
+    }).then((stop) => {
+      if (disposed) void stop();
+      else unsubscribe = stop;
+    }).catch((error) => console.error("Unable to subscribe to launcher updates", error));
+    return () => {
+      disposed = true;
+      void unsubscribe?.();
+    };
+  }, []);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
   const [installStatuses, setInstallStatuses] = useState<Record<string, BlenderReleaseInstallProgress>>({});
   const [isLoadingReleases, setIsLoadingReleases] = useState(false);
@@ -322,6 +339,21 @@ export default function App() {
   const [activeConfigVersion, setActiveConfigVersion] = useState<BlenderVersion | null>(null);
   const [activeConfigDialogMode, setActiveConfigDialogMode] = useState<ConfigDialogMode | null>(null);
   const [blenderConfigs, setBlenderConfigs] = useState<BlenderConfigProfile[]>([]);
+  useEffect(() => {
+    let disposed = false;
+    const subscriptions: UnlistenFn[] = [];
+    const keep = (stop: UnlistenFn) => {
+      if (disposed) void stop();
+      else subscriptions.push(stop);
+    };
+    void listen<RecentProject[]>("recent-projects-updated", ({ payload }) => {
+      if (!disposed) setRecentProjects(payload);
+    }).then(keep).catch((error) => console.error("Unable to subscribe to recent project updates", error));
+    void listen<BlenderConfigProfile[]>("blender-configs-updated", ({ payload }) => {
+      if (!disposed) setBlenderConfigs(payload);
+    }).then(keep).catch((error) => console.error("Unable to subscribe to config updates", error));
+    return () => { disposed = true; subscriptions.forEach((stop) => void stop()); };
+  }, []);
   const [blenderConfigName, setBlenderConfigName] = useState("");
   const [blenderConfigError, setBlenderConfigError] = useState<string | null>(null);
   const [blenderConfigNotice, setBlenderConfigNotice] = useState<string | null>(null);
@@ -1580,6 +1612,8 @@ export default function App() {
               />
             ) : null}
             <AppFooter
+              onOpenMcpSettings={() => setSettingsOpen(true)}
+              mcpRevision={mcpRevision}
               appVersion={footerVersionLabel}
               updateSummary={appUpdateSummary}
               updateTone={appUpdateTone}
@@ -1642,6 +1676,7 @@ export default function App() {
           />
         )}
       </AppLayout>
+      {settingsOpen ? <McpSettingsDialog onClose={() => setSettingsOpen(false)} onSaved={() => setMcpRevision((revision) => revision + 1)} /> : null}
 
       {shouldShowAppUpdateToast ? (
         <AppUpdateToast

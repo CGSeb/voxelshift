@@ -3,100 +3,73 @@
 [![Coverage Status](https://coveralls.io/repos/github/CGSeb/voxelshift/badge.svg?branch=main&id=3)](https://coveralls.io/github/CGSeb/voxelshift?branch=main)
 [![Latest Version](https://img.shields.io/github/v/release/CGSeb/voxelshift?display_name=tag&id=1)](https://github.com/CGSeb/voxelshift/releases/latest)
 
-Voxel Shift is an open source desktop launcher for Blender, built with Tauri, React, TypeScript, and Rust.
+Voxel Shift is an open source desktop app for managing Blender versions, reopening projects, and scheduling background renders.
 
-![VoxelShift home](/img/voxelshift-home.jpg)
+Version **1.6.0** adds an embedded MCP server for compatible AI assistants. See the [release notes](release-notes/1.6.0.md).
 
-It is aimed at artists and technical users who keep multiple Blender installs around and want one place to:
+![Voxel Shift home](img/voxelshift-home.jpg)
 
-- browse official Blender downloads
-- install managed Blender builds
-- launch the right Blender version quickly
-- keep favorite versions close at hand
-- reopen recent projects with the Blender build they came from
+## Download
 
+Get a Windows or Linux build from [GitHub Releases](https://github.com/CGSeb/voxelshift/releases). The app includes update notifications and installation controls. macOS packages are not currently available.
 
-![VoxelShift releases](/img/voxelshift-release.jpg)
+## Features
 
-## App Overview
+### Blender library and projects
 
-### Home
+Manage multiple Blender versions, choose a default, and favorite versions for quick access. Reopen recent projects with their associated Blender version and browse project thumbnails.
 
-- recent projects with thumbnail fallback handling
-- favorite Blender versions with launch shortcuts
-- version status badges such as `Default` and `LTS`
+### Releases and migration
 
-### Installing a version
+Browse and install official stable releases and experimental daily builds. Each managed installation has its own portable setup. Transfer settings, extensions, and legacy add-ons from an existing setup, with options to copy or link extensions.
 
-The install dialog lets you transfer a previous Blender setup or install fresh. Settings and legacy add-ons from the selected version are copied automatically when available. **Copy** automatically uses the selected previous version's extensions folder without showing a folder control. **Symlink** provides a separate editable folder for each installed extension. Symlink folder choices persist while toggling modes; switching the previous version resets them. Files go into the new installation's `portable/config`, `portable/extensions`, and `portable/scripts/addons` folders.
+![Voxel Shift releases](img/voxelshift-release.jpg)
 
-In Advanced options, choose **Copy** or **Symlink** for each extension, or change the default toggle to reset all extensions to one method. Copies always use the previous version's extension folder; linked extensions can each use a custom source folder. Settings and legacy add-ons are always copied, and Voxel Shift's bundled extension stays independent. Linked extensions require their source folders to remain available, so keep those folders when uninstalling the previous version. Windows may require Developer Mode or administrator rights to create symlinks. Use **Copy** if symlink creation is unavailable.
+### Saved configurations
 
-## Tech Stack
+Save named configuration snapshots and apply them to other Blender installations to reuse preferences, startup files, and themes.
 
-- Tauri 2
-- React 19
-- TypeScript
-- Vite
-- Rust backend for filesystem, process launching, install management, and release parsing
+### Running sessions
 
-## Local Development
+Monitor Blender sessions launched through Voxel Shift, view their logs, and stop running instances.
 
-### Prerequisites
+### Render planner
 
-- Node.js and npm
-- Rust toolchain
-- Tauri system prerequisites for your OS
+Schedule animation renders with a frame range, start time, Blender version, and optional output folder. Track progress, estimated time remaining, and logs; edit pending jobs and duplicate existing jobs.
 
-### Run The App
+Jobs run sequentially while Voxel Shift is open. Cancelling a running render is not yet supported. Native file/folder pickers and optional shutdown after rendering are currently Windows-only.
 
-```powershell
-npm install
-npm run tauri dev
-```
+### MCP integration
 
-### Frontend Build
+The embedded local MCP server provides **35 tools** for managing Blender versions, projects, sessions, installations, configurations, and render jobs. Actions performed by a client also update the app UI.
 
-```powershell
-npm run build
-```
+Click **MCP** in the bottom bar to enable the server and configure its port. Connect a compatible local client using the URL and access token shown in the settings. Voxel Shift must remain open.
 
-### Desktop Build
-
-```powershell
-npm run tauri build
-```
-
-## Release notes
-
-Before pushing a version tag, add a short `release-notes/<version>.md` file (for example, `release-notes/1.5.0.md`) and commit it with the version bump. Use a few short paragraphs or `-` bullet points; the app displays the notes as plain text.
-
-The release workflow uses this file for both the GitHub release description and the updater's `latest.json` notes. The update popup shows them under **What's new**, with scrolling for longer notes. Missing or empty notes stop the release build. Review the notes before tagging, then publish the draft release after its builds finish.
-
-Editing only the GitHub release description afterward does not update the popup: it reads the notes bundled into `latest.json` during the release build.
-
-## Repository Layout
-
-- `src/` - React UI, page composition, styling, and Tauri API client calls
-- `src-tauri/` - Rust backend commands, Blender discovery, release parsing, download/install logic, and desktop packaging
-- `resources/` - bundled Blender extension resources used during managed installs
+See the [MCP guide](mcp/README.md) for setup, supported tools, and troubleshooting.
 
 ## Roadmap
 
-Some of the next high-value improvements are:
+Planned priorities, in order; scope and timing may change:
 
-- test coverage for release parsing and launcher flows
-- packaging and release automation
+1. **Render control:** cancel and retry renders, pause and reorder the queue, and add completion/failure notifications.
+2. **Installation and migration recovery:** resume interrupted downloads, back up configurations, support rollback, and detect broken extension links.
+3. **MCP usability:** expose progress for long operations, test connections, and add token regeneration and access controls.
+4. **Background operation:** keep scheduled work running when the window closes and improve recovery after app restarts.
+
+## Development
+
+Built with Tauri, React, TypeScript, and Rust. Development requires Node.js, npm, Rust, and the platform's Tauri build prerequisites.
+
+```sh
+npm ci
+npm run tauri dev
+```
+
+Build desktop packages with `npm run tauri build`. Run frontend tests with `npm test` and backend tests with `cargo test --manifest-path src-tauri/Cargo.toml --lib`.
 
 ## Contributing
 
-Issues and pull requests are welcome.
-
-If you open a bug report, it helps to include:
-
-- operating system
-- Blender version involved
-- reproduction steps
+Issues and pull requests are welcome. Include your operating system, app and Blender versions, reproduction steps, and relevant logs in bug reports. Remove access tokens before sharing logs or configuration files.
 
 ## License
 

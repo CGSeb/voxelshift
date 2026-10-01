@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
@@ -21,6 +21,8 @@ const tauriMocks = vi.hoisted(() => ({
 }));
 
 const apiMocks = vi.hoisted(() => ({
+  getMcpSettings: vi.fn(),
+  setMcpSettings: vi.fn(),
   applyBlenderConfig: vi.fn(),
   cancelBlenderReleaseInstall: vi.fn(),
   createPlannerRun: vi.fn(),
@@ -257,6 +259,7 @@ describe("App", () => {
     tauriMocks.listen.mockResolvedValue(vi.fn());
     updaterMocks.checkForAppUpdate.mockResolvedValue(null);
     apiMocks.getLauncherState.mockResolvedValue(launcherState);
+    apiMocks.getMcpSettings.mockResolvedValue({ enabled: false, running: false, port: 47831, token: "test-token", error: null });
     apiMocks.getPlannerLogs.mockResolvedValue([plannerLog]);
     apiMocks.getPlannerRuns.mockResolvedValue([]);
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
@@ -300,6 +303,34 @@ describe("App", () => {
     await waitFor(() => {
       expect(JSON.parse(localStorage.getItem(favoriteReleaseStorageKey) ?? "[]")).toEqual([stableDownload.version]);
     });
+  });
+
+  it("reflects launcher state changes from MCP in the UI", async () => {
+    localStorage.setItem(favoriteReleaseStorageKey, JSON.stringify([stableDownload.version]));
+    render(<App />);
+    await screen.findByRole("button", { name: "Launch Blender 4.2.3" });
+    act(() => emitTauriEvent("launcher-state-updated", {
+      ...launcherState,
+      versions: [{ ...installedVersion, displayName: "Blender MCP launch" }],
+    }));
+    expect(await screen.findByRole("button", { name: "Launch Blender MCP launch" })).toBeInTheDocument();
+  });
+
+  it("opens MCP settings from the footer and closes without saving", async () => {
+    render(<App />);
+    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "MCP: disabled. Open settings" }));
+    expect(await screen.findByRole("switch", { name: "Enable MCP server" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog", { name: "MCP connection" })).not.toBeInTheDocument();
+    expect(apiMocks.setMcpSettings).not.toHaveBeenCalled();
+  });
+
+  it("refreshes recent projects after an MCP history update", async () => {
+    render(<App />);
+    await screen.findByText("Test Scene");
+    act(() => emitTauriEvent("recent-projects-updated", []));
+    expect(screen.queryByText("Test Scene")).not.toBeInTheDocument();
   });
 
   it("shows updater details and completes an in-app update install", async () => {

@@ -2949,3 +2949,17 @@ select.release-config-input option {
 
 
 
+
+.mcp-status-button { display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 999px; background: #181818; color: #f4efe7; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.mcp-status-button:hover { background: #242424; border-color: rgba(255, 255, 255, 0.22); }
+.mcp-status-button:focus-visible { outline: 2px solid #01e675; outline-offset: 3px; }
+.mcp-status-dot-disabled, .mcp-status-dot-loading { background: #050505; box-shadow: 0 0 0 1px #454545; }
+.mcp-status-dot-error { background: #ff6666; box-shadow: 0 0 10px rgba(255, 102, 102, 0.22); }
+.mcp-settings-dialog { display: grid; gap: 20px; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; border-color: rgba(255, 255, 255, 0.12); background: linear-gradient(180deg, rgba(1, 230, 117, 0.04), transparent 50%), #141414; }
+.mcp-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.mcp-toggle-row span { display: grid; gap: 6px; }
+.mcp-toggle-row small { color: var(--text-muted, #9ba6b7); line-height: 1.5; }
+.mcp-toggle-row input { width: 20px; height: 20px; flex-shrink: 0; accent-color: #01e675; }
+.mcp-connection-details { display: grid; gap: 12px; }
+.mcp-connection-details p { margin: 0; }
+.mcp-connection-details button { justify-self: start; }

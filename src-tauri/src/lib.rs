@@ -23,6 +23,7 @@ use std::os::windows::process::CommandExt;
 
 mod planner;
 mod migration;
+mod mcp;
 
 const STATE_FILE_NAME: &str = "launcher-state.json";
 const WINDOW_STATE_FILE_NAME: &str = "window-state.json";
@@ -486,6 +487,9 @@ pub fn run() {
         .manage(planner::PlannerRegistry::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            if let Err(error) = mcp::initialize(app.handle()) {
+                eprintln!("Unable to initialize MCP server: {error}");
+            }
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(icon) = app.default_window_icon().cloned() {
                     window.set_icon(icon)?;
@@ -524,6 +528,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            mcp::get_mcp_settings,
+            mcp::set_mcp_settings,
             get_launcher_state,
             get_recent_projects,
             refresh_managed_blender_extensions,
@@ -560,8 +566,15 @@ pub fn run() {
             install_blender_release,
             cancel_blender_release_install
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Voxel Shift");
+        .build(tauri::generate_context!())
+        .expect("error while building Voxel Shift")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(server) = app.try_state::<mcp::McpServerControl>() {
+                    server.stop();
+                }
+            }
+        });
 }
 
 #[tauri::command]

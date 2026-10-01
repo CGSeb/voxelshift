@@ -13,6 +13,22 @@ import type {
   RunningBlenderProcess,
 } from "../types";
 
+export interface McpSettingsStatus {
+  enabled: boolean;
+  port: number;
+  token: string;
+  running: boolean;
+  error: string | null;
+}
+
+export function getMcpSettings() {
+  return invoke<McpSettingsStatus>("get_mcp_settings");
+}
+
+export function setMcpSettings(enabled: boolean, port: number) {
+  return invoke<McpSettingsStatus>("set_mcp_settings", { enabled, port });
+}
+
 interface RegisterPayload {
   path: string;
   label?: string | null;
