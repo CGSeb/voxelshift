@@ -579,6 +579,49 @@ fn start_due_run<R: tauri::Runtime>(
     planner: &PlannerRegistry,
     run_id: &str,
 ) -> Result<(), String> {
+    start_due_run_with(&TauriPlannerHost(app.clone()), planner, run_id)
+}
+
+// Keep OS/UI effects at the boundary so lifecycle tests use real child processes
+// while recording persistence/events and replacing computer shutdown.
+trait PlannerHost: Clone + Send + Sync + 'static {
+    fn save(&self, planner: &PlannerRegistry) -> Result<(), String>;
+    fn runs_changed(&self, planner: &PlannerRegistry);
+    fn log(&self, payload: PlannerLogEventPayload);
+    fn shutdown(&self) -> Result<(), String>;
+}
+
+struct TauriPlannerHost<R: tauri::Runtime>(AppHandle<R>);
+
+impl<R: tauri::Runtime> Clone for TauriPlannerHost<R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<R: tauri::Runtime> PlannerHost for TauriPlannerHost<R> {
+    fn save(&self, planner: &PlannerRegistry) -> Result<(), String> {
+        save_if_dirty(&self.0, planner)
+    }
+
+    fn runs_changed(&self, planner: &PlannerRegistry) {
+        emit_planner_runs_changed(&self.0, planner);
+    }
+
+    fn log(&self, payload: PlannerLogEventPayload) {
+        let _ = self.0.emit(PLANNER_LOG_EVENT, payload);
+    }
+
+    fn shutdown(&self) -> Result<(), String> {
+        schedule_system_shutdown()
+    }
+}
+
+fn start_due_run_with<H: PlannerHost>(
+    app: &H,
+    planner: &PlannerRegistry,
+    run_id: &str,
+) -> Result<(), String> {
     let run = {
         let state = planner
             .inner
@@ -672,8 +715,8 @@ fn start_due_run<R: tauri::Runtime>(
         state.dirty = true;
     }
 
-    save_if_dirty(app, planner)?;
-    emit_planner_runs_changed(app, planner);
+    app.save(planner)?;
+    app.runs_changed(planner);
     append_log_and_emit(app, planner, run_id, "system", "Scheduled render started.")?;
     spawn_log_reader(app.clone(), planner.clone(), run_id.to_string(), "stdout", stdout);
     spawn_log_reader(app.clone(), planner.clone(), run_id.to_string(), "stderr", stderr);
@@ -681,8 +724,8 @@ fn start_due_run<R: tauri::Runtime>(
     Ok(())
 }
 
-fn fail_run_before_start<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+fn fail_run_before_start<H: PlannerHost>(
+    app: &H,
     planner: &PlannerRegistry,
     run_id: &str,
     message: &str,
@@ -701,13 +744,13 @@ fn fail_run_before_start<R: tauri::Runtime>(
     }
 
     append_log_and_emit(app, planner, run_id, "system", message)?;
-    save_if_dirty(app, planner)?;
-    emit_planner_runs_changed(app, planner);
+    app.save(planner)?;
+    app.runs_changed(planner);
     Ok(())
 }
 
-fn spawn_log_reader<R: tauri::Runtime, S>(
-    app: AppHandle<R>,
+fn spawn_log_reader<H: PlannerHost, S>(
+    app: H,
     planner: PlannerRegistry,
     run_id: String,
     source: &'static str,
@@ -795,8 +838,8 @@ fn process_run_exit_in_state(
     })
 }
 
-fn spawn_process_monitor<R: tauri::Runtime>(
-    app: AppHandle<R>,
+fn spawn_process_monitor<H: PlannerHost>(
+    app: H,
     planner: PlannerRegistry,
     run_id: String,
     child: Arc<Mutex<Child>>,
@@ -839,7 +882,7 @@ fn spawn_process_monitor<R: tauri::Runtime>(
 
             let _ = append_log_and_emit(&app, &planner, &run_id, "system", &outcome.exit_message);
             if outcome.should_shutdown {
-                let shutdown_message = match schedule_system_shutdown() {
+                let shutdown_message = match app.shutdown() {
                     Ok(()) => format!(
                         "Computer shutdown scheduled in {PLANNER_SHUTDOWN_DELAY_SECONDS} seconds."
                     ),
@@ -847,15 +890,17 @@ fn spawn_process_monitor<R: tauri::Runtime>(
                 };
                 let _ = append_log_and_emit(&app, &planner, &run_id, "system", &shutdown_message);
             }
-            let _ = save_if_dirty(&app, &planner);
-            emit_planner_runs_changed(&app, &planner);
+            let _ = app.save(&planner);
+            app.runs_changed(&planner);
             break;
         }
 
         thread::sleep(Duration::from_millis(500));
     });
-}fn append_log_and_emit<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+}
+
+fn append_log_and_emit<H: PlannerHost>(
+    app: &H,
     planner: &PlannerRegistry,
     run_id: &str,
     source: &str,
@@ -880,13 +925,10 @@ fn spawn_process_monitor<R: tauri::Runtime>(
         entry
     };
 
-    let _ = app.emit(
-        PLANNER_LOG_EVENT,
-        PlannerLogEventPayload {
-            run_id: run_id.to_string(),
-            entry,
-        },
-    );
+    app.log(PlannerLogEventPayload {
+        run_id: run_id.to_string(),
+        entry,
+    });
 
     Ok(())
 }
@@ -1340,6 +1382,11 @@ pub(crate) fn pick_windows_folder(_title: &str) -> Result<Option<String>, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod processes {
+        use super::*;
+        include!("planner_process_tests.rs");
+    }
 
     fn test_run(logs: Vec<PlannerLogEntry>) -> PlannerRunRecord {
         PlannerRunRecord {

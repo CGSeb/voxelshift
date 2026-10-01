@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { McpSettingsDialog } from "./McpSettingsDialog";
 import { getMcpSettings, setMcpSettings } from "../lib/api";
@@ -65,5 +65,95 @@ describe("MCP settings", () => {
     render(<McpSettingsDialog onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Settings unavailable."));
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+  });
+
+  it("traps keyboard focus and restores focus and scrolling on unmount", async () => {
+    const { unmount } = render(<button>Open settings</button>);
+    const opener = screen.getByRole("button", { name: "Open settings" });
+    opener.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "scroll";
+    const dialog = render(<McpSettingsDialog onClose={vi.fn()} />);
+    try {
+      const panel = screen.getByRole("dialog");
+      expect(panel).toHaveFocus();
+      expect(document.body.style.overflow).toBe("hidden");
+      const first = await screen.findByRole("switch");
+      const last = screen.getByRole("button", { name: "Save settings" });
+      fireEvent.keyDown(panel, { key: "Tab" });
+      expect(first).toHaveFocus();
+      fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+      expect(last).toHaveFocus();
+      fireEvent.keyDown(last, { key: "Tab" });
+      expect(first).toHaveFocus();
+      panel.focus();
+      fireEvent.keyDown(panel, { key: "Tab", shiftKey: true });
+      expect(last).toHaveFocus();
+      dialog.unmount();
+      expect(opener).toHaveFocus();
+      expect(document.body.style.overflow).toBe("scroll");
+    } finally {
+      dialog.unmount();
+      unmount();
+      document.body.style.overflow = previousOverflow;
+    }
+  });
+
+  it("blocks dismissal and repeated saves until the pending save finishes", async () => {
+    let finish!: (value: typeof saved) => void;
+    vi.mocked(setMcpSettings).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const close = vi.fn();
+    render(<McpSettingsDialog onClose={close} />);
+    await screen.findByLabelText("Port");
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    const saving = screen.getByRole("button", { name: "Saving…" });
+    expect(saving).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    expect(screen.getByLabelText("Port")).toBeDisabled();
+    expect(screen.getByRole("switch")).toBeDisabled();
+    fireEvent.click(saving);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    fireEvent.click(screen.getByRole("dialog").parentElement!);
+    expect(close).not.toHaveBeenCalled();
+    expect(setMcpSettings).toHaveBeenCalledTimes(1);
+    await act(async () => finish(saved));
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports clipboard and server errors while keeping the token available", async () => {
+    vi.mocked(getMcpSettings).mockResolvedValue({ ...saved, error: "MCP is not running. Save settings to retry." });
+    const writeText = vi.fn().mockRejectedValue(new Error("Clipboard denied"));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const close = vi.fn();
+    render(<McpSettingsDialog onClose={close} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Copy access token" }));
+    expect(await screen.findByText("Could not copy the access token. Select and copy it from the field.")).toBeInTheDocument();
+    expect(screen.getByText("MCP is not running. Save settings to retry.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Access token")).toHaveValue(saved.token);
+    fireEvent.click(screen.getByRole("dialog"));
+    expect(close).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("dialog").parentElement!);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it.each(["", "-1", "65536", "1.5"])("rejects invalid port %s", async (port) => {
+    render(<McpSettingsDialog onClose={vi.fn()} />);
+    const input = await screen.findByLabelText("Port");
+    fireEvent.change(input, { target: { value: port } });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("Choose a whole number from 1 to 65535.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    expect(screen.getByLabelText("Connection URL")).toHaveValue("");
+    expect(setMcpSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 65535])("saves boundary port %s", async (port) => {
+    vi.mocked(setMcpSettings).mockResolvedValue({ ...saved, port });
+    const close = vi.fn();
+    render(<McpSettingsDialog onClose={close} />);
+    fireEvent.change(await screen.findByLabelText("Port"), { target: { value: String(port) } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(setMcpSettings).toHaveBeenCalledWith(false, port);
   });
 });
