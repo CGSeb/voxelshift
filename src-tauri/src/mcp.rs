@@ -500,6 +500,119 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn status_reports_disabled_stopped_and_failed_servers() {
+        let mut runtime = Runtime {
+            settings: new_settings().unwrap(),
+            server: None,
+            error: None,
+        };
+        assert!(!runtime.status().running);
+        assert!(runtime.status().error.is_none());
+        runtime.settings.enabled = true;
+        assert_eq!(
+            runtime.status().error.as_deref(),
+            Some("MCP is not running. Save settings to retry.")
+        );
+        runtime.error = Some("Port occupied".into());
+        assert_eq!(runtime.status().error.as_deref(), Some("Port occupied"));
+        assert!(runtime.status().settings.enabled);
+    }
+
+    #[tokio::test]
+    async fn zero_port_is_rejected_without_changing_settings_or_dispatching() {
+        let saved = new_settings().unwrap();
+        let control = McpServerControl {
+            shutdown: CancellationToken::new(),
+            path: std::env::temp_dir()
+                .join(format!("voxelshift-invalid-port-{}", saved.token))
+                .join("settings.json"),
+            runtime: tokio::sync::Mutex::new(Runtime {
+                settings: saved.clone(),
+                server: None,
+                error: None,
+            }),
+        };
+        let dispatch: Dispatcher =
+            Arc::new(|_| panic!("Invalid settings must not dispatch actions"));
+        for enabled in [false, true] {
+            let error = update(&control, enabled, 0, dispatch.clone())
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error, "Choose a port from 1 to 65535.");
+            let status = control.runtime.lock().await.status();
+            assert_eq!(status.settings.port, saved.port);
+            assert_eq!(status.settings.token, saved.token);
+            assert!(!status.settings.enabled);
+            assert!(!control.path.exists());
+        }
+        assert_eq!(bind(0).unwrap_err(), "Choose a port from 1 to 65535.");
+        control.stop();
+        assert!(control.shutdown.is_cancelled());
+    }
+
+    #[test]
+    fn rejects_corrupt_and_invalid_persisted_settings() {
+        let saved = new_settings().unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("voxelshift-corrupt-settings-{}", saved.token));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        for contents in [
+            "{broken".to_string(),
+            json!({"enabled":true,"port":47831}).to_string(),
+        ] {
+            fs::write(&path, contents).unwrap();
+            assert!(load_settings(&path)
+                .err()
+                .unwrap()
+                .starts_with("Invalid MCP settings:"));
+        }
+        for (token, port) in [("short".to_string(), 47831), (saved.token.clone(), 0)] {
+            fs::write(
+                &path,
+                json!({"enabled":false,"port":port,"token":token}).to_string(),
+            )
+            .unwrap();
+            assert!(load_settings(&path).is_err());
+        }
+        assert!(load_settings(&directory)
+            .err()
+            .unwrap()
+            .starts_with("Unable to read MCP settings:"));
+        // All paths are isolated in this test's newly created temporary directory.
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn resolves_read_only_operations_and_preserves_project_arguments() {
+        assert!(matches!(
+            parse_operation("get_recent_projects", JsonObject::new()).unwrap(),
+            Operation::RecentProjects
+        ));
+        assert!(matches!(
+            parse_operation("get_running_blenders", JsonObject::new()).unwrap(),
+            Operation::RunningBlenders
+        ));
+        let args = json!({"id":"v1", "projectPath":"D:/Project files/é.blend"});
+        match parse_operation("launch_blender_project", args.as_object().unwrap().clone()).unwrap()
+        {
+            Operation::Launch(project) => {
+                assert_eq!(project.id, "v1");
+                assert_eq!(project.project_path, "D:/Project files/é.blend");
+            }
+            other => panic!("Unexpected operation: {other:?}"),
+        }
+        let server = EmbeddedServer {
+            dispatch: Arc::new(|_| Ok(json!([]))),
+            operation_lock: Arc::new(Mutex::new(())),
+        };
+        assert!(server.get_tool("get_recent_projects").is_some());
+        assert!(server.get_tool("unknown_tool").is_none());
+    }
+
+    #[test]
     fn exposes_every_app_command_except_transport_settings() {
         let source = include_str!("lib.rs");
         let commands = source

@@ -14,6 +14,8 @@ import {
   getBlenderLtsReleaseLines,
   getBlenderReleaseDownloads,
   getLauncherState,
+  getMcpSettings,
+  setMcpSettings,
   getInstallMigrationFolders,
   getInstallMigrationLinks,
   pickInstallMigrationFolder,
@@ -40,6 +42,22 @@ describe("api wrappers", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(undefined);
+  });
+
+  it("passes MCP settings and backend errors through the Tauri boundary", async () => {
+    const status = { enabled: true, port: 49000, token: "test-token", running: true, error: null };
+    invokeMock.mockResolvedValueOnce(status).mockResolvedValueOnce(status);
+    await expect(getMcpSettings()).resolves.toEqual(status);
+    await expect(setMcpSettings(true, 49000)).resolves.toEqual(status);
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_mcp_settings"],
+      ["set_mcp_settings", { enabled: true, port: 49000 }],
+    ]);
+    invokeMock.mockRejectedValueOnce("Port occupied");
+    await expect(setMcpSettings(false, 49000)).rejects.toBe("Port occupied");
+    expect(invokeMock).toHaveBeenLastCalledWith("set_mcp_settings", { enabled: false, port: 49000 });
+    invokeMock.mockRejectedValueOnce("Settings unavailable");
+    await expect(getMcpSettings()).rejects.toBe("Settings unavailable");
   });
 
   it("preserves migration choices and nullable folder results across the Tauri boundary", async () => {

@@ -33,7 +33,7 @@ export function McpSettingsDialog({ onClose, onSaved }: { onClose: () => void; o
       if (!busy) onClose();
     }
     if (event.key === "Tab") {
-      const focusable = Array.from(panel.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)") ?? []);
+      const focusable = Array.from(panel.current?.querySelectorAll<HTMLElement>(":is(button, input):not(:disabled)") ?? []);
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (!first) { event.preventDefault(); return; }
