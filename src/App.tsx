@@ -1,6 +1,6 @@
 ﻿import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { AppUpdateToast } from "./components/AppUpdateToast";
 import { BlenderLogsDialog } from "./components/BlenderLogsDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -16,6 +16,11 @@ import {
   applyBlenderConfig,
   cancelBlenderReleaseInstall,
   createPlannerRun,
+  cancelPlannerRun,
+  retryPlannerRun,
+  getPlannerQueue,
+  setPlannerQueuePaused,
+  reorderPlannerQueue,
   deletePlannerRun,
   updatePlannerRun,
   getBlenderConfigs,
@@ -58,6 +63,7 @@ import type {
   PlannerLogEntry,
   PlannerLogEvent,
   PlannerRunSummary,
+  PlannerQueueState,
   RecentProject,
   ReleaseInstallPhase,
   RunningBlenderProcess,
@@ -379,6 +385,11 @@ export default function App() {
   const [stopBlenderError, setStopBlenderError] = useState<string | null>(null);
   const [stoppingBlenderId, setStoppingBlenderId] = useState<string | null>(null);
   const [plannerRuns, setPlannerRuns] = useState<PlannerRunSummary[]>([]);
+  const [plannerQueue, setPlannerQueue] = useState<PlannerQueueState>({ paused: false, pendingRunIds: [] });
+  const [isControllingPlanner, setIsControllingPlanner] = useState(false);
+  const plannerControlBusy = useRef(false);
+  const [pendingPlannerControl, setPendingPlannerControl] = useState<{ run: PlannerRunSummary; action: "cancel" | "retry" } | null>(null);
+  const [plannerNotifications, setPlannerNotifications] = useState<PlannerRunSummary[]>([]);
   const [plannerLogsByRunId, setPlannerLogsByRunId] = useState<Record<string, PlannerLogEntry[]>>({});
   const [isLoadingPlanner, setIsLoadingPlanner] = useState(false);
   const [plannerError, setPlannerError] = useState<string | null>(null);
@@ -386,6 +397,36 @@ export default function App() {
   const [plannerCreateError, setPlannerCreateError] = useState<string | null>(null);
   const [plannerNotice, setPlannerNotice] = useState<string | null>(null);
   const [activePlannerLogsRunId, setActivePlannerLogsRunId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let queueChanged = false;
+    const unlisteners: UnlistenFn[] = [];
+    async function subscribe() {
+      const queueUnlisten = await listen<PlannerQueueState>("planner-queue-updated", (event) => {
+        if (disposed) return;
+        queueChanged = true;
+        setPlannerQueue(event.payload);
+      });
+      if (disposed) { queueUnlisten(); return; }
+      unlisteners.push(queueUnlisten);
+      const finishedUnlisten = await listen<PlannerRunSummary>("planner-run-finished", (event) => {
+        if (disposed) return;
+        setPlannerNotifications((current) => [...current.filter((run) => run.id !== event.payload.id), event.payload].slice(-5));
+      });
+      if (disposed) { finishedUnlisten(); return; }
+      unlisteners.push(finishedUnlisten);
+      const queue = await getPlannerQueue();
+      if (!disposed && !queueChanged) setPlannerQueue(queue);
+    }
+    void subscribe().catch((error) => {
+      if (!disposed) setPlannerError(readErrorMessage(error, "Could not load render queue controls."));
+    });
+    return () => {
+      disposed = true;
+      for (const unlisten of unlisteners) unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -1206,6 +1247,26 @@ export default function App() {
     }
   }
 
+  async function controlPlanner(operation: () => Promise<unknown>, notice: string) {
+    if (plannerControlBusy.current) return;
+    plannerControlBusy.current = true;
+    setIsControllingPlanner(true);
+    setPlannerError(null);
+    try {
+      await operation();
+      setPendingPlannerControl(null);
+      const [runs, queue] = await Promise.all([getPlannerRuns(), getPlannerQueue()]);
+      setPlannerRuns(runs);
+      setPlannerQueue(queue);
+      setPlannerNotice(notice);
+    } catch (error) {
+      setPlannerError(readErrorMessage(error, "Could not control this render queue."));
+    } finally {
+      plannerControlBusy.current = false;
+      setIsControllingPlanner(false);
+    }
+  }
+
   function openStopBlenderDialog(process: BlenderSession) {
     setPendingStopBlenderId(process.instanceId);
     setStopBlenderError(null);
@@ -1472,12 +1533,13 @@ export default function App() {
       return;
     }
 
-    if (plannerRuns.some((run) => run.id === activePlannerLogsRunId)) {
+    if (plannerRuns.some((run) => run.id === activePlannerLogsRunId)
+      || plannerNotifications.some((run) => run.id === activePlannerLogsRunId)) {
       return;
     }
 
     setActivePlannerLogsRunId(null);
-  }, [activePlannerLogsRunId, plannerRuns]);
+  }, [activePlannerLogsRunId, plannerRuns, plannerNotifications]);
 
   useEffect(() => {
     if (!pendingStopBlenderId) {
@@ -1507,7 +1569,8 @@ export default function App() {
     .map((versionNumber) => installedReleaseVersions.get(versionNumber))
     .filter((version): version is BlenderVersion => Boolean(version));
   const activeLogsProcess = blenderSessions.find((session) => session.instanceId === activeLogsProcessId) ?? null;
-  const activePlannerLogsRun = plannerRuns.find((run) => run.id === activePlannerLogsRunId) ?? null;
+  const activePlannerLogsRun = plannerRuns.find((run) => run.id === activePlannerLogsRunId)
+    ?? plannerNotifications.find((run) => run.id === activePlannerLogsRunId) ?? null;
   const pendingStopBlender = runningBlenders.find((process) => process.instanceId === pendingStopBlenderId) ?? null;
 
   async function confirmUninstall() {
@@ -1642,7 +1705,15 @@ export default function App() {
         ) : activePage === "planner" ? (
           <PlannerPage
             blenderVersions={launcherState?.versions.filter((version) => version.available) ?? []}
-            plannerRuns={plannerRuns}
+            plannerRuns={[...plannerRuns].sort((left, right) => {
+              const ranks = { running: 0, pending: 1, failed: 2, completed: 3, cancelled: 4 };
+              const statusOrder = ranks[left.status] - ranks[right.status];
+              if (statusOrder !== 0) return statusOrder;
+              if (left.status !== "pending" || right.status !== "pending") return 0;
+              const leftIndex = plannerQueue.pendingRunIds.indexOf(left.id);
+              const rightIndex = plannerQueue.pendingRunIds.indexOf(right.id);
+              return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex) - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex);
+            })}
             errorMessage={plannerError}
             submitErrorMessage={plannerCreateError}
             noticeMessage={plannerNotice}
@@ -1655,6 +1726,12 @@ export default function App() {
             onBrowseOutputFolder={browsePlannerOutputFolder}
             onOpenLogs={(run) => void openPlannerLogs(run)}
             onDeleteRun={(run) => void deletePlannerRunById(run)}
+            queuePaused={plannerQueue.paused}
+            isControlling={isControllingPlanner}
+            onToggleQueuePaused={() => void controlPlanner(() => setPlannerQueuePaused(!plannerQueue.paused), plannerQueue.paused ? "Queue resumed." : "Queue paused.")}
+            onReorderQueue={(ids) => void controlPlanner(() => reorderPlannerQueue(ids), "Queue order updated.")}
+            onCancelRun={(run) => { setPlannerError(null); setPendingPlannerControl({ run, action: "cancel" }); }}
+            onRetryRun={(run) => { setPlannerError(null); setPendingPlannerControl({ run, action: "retry" }); }}
           />
         ) : (
           <ReleasesPage
@@ -1677,6 +1754,37 @@ export default function App() {
         )}
       </AppLayout>
       {settingsOpen ? <McpSettingsDialog onClose={() => setSettingsOpen(false)} onSaved={() => setMcpRevision((revision) => revision + 1)} /> : null}
+
+      <aside className="planner-notifications" aria-label="Render notifications">
+        {plannerNotifications.map((run) => (
+          <section className={`planner-notification planner-notification-${run.status}`} key={run.id} role={run.status === "failed" ? "alert" : "status"}>
+            <strong>{run.status === "completed" ? "Render completed" : "Render failed"}</strong>
+            <p>{run.blendFilePath.split(/[\\/]/).pop()}</p>
+            {run.lastErrorMessage ? <p>{run.lastErrorMessage}</p> : null}
+            <div className="planner-run-actions">
+              <button className="card-action card-action-secondary" type="button" onClick={() => void openPlannerLogs(run)}>View render logs</button>
+              <button className="card-action card-action-secondary" type="button" aria-label={`Dismiss notification for ${run.blendFilePath.split(/[\\/]/).pop()}`} onClick={() => setPlannerNotifications((current) => current.filter((item) => item.id !== run.id))}>Dismiss</button>
+            </div>
+          </section>
+        ))}
+      </aside>
+
+      <ConfirmDialog
+        open={pendingPlannerControl !== null}
+        title={pendingPlannerControl?.action === "retry" ? "Retry this render?" : "Cancel this render?"}
+        description={pendingPlannerControl?.action === "retry"
+          ? `A new render will start from frame ${pendingPlannerControl.run.startFrame} using the same settings. Existing output files may be overwritten.${pendingPlannerControl.run.shutdownWhenDone ? " This task will shut down the computer after a successful render." : ""}`
+          : "The render will be stopped. Frames already written to disk will be kept."}
+        errorMessage={plannerError}
+        confirmLabel={pendingPlannerControl?.action === "retry" ? "Retry render" : "Cancel render"}
+        cancelLabel="Keep it"
+        isConfirming={isControllingPlanner}
+        confirmingLabel="Applying..."
+        onCancel={() => { if (!plannerControlBusy.current) setPendingPlannerControl(null); }}
+        onConfirm={() => pendingPlannerControl
+          ? controlPlanner(() => pendingPlannerControl.action === "retry" ? retryPlannerRun(pendingPlannerControl.run.id) : cancelPlannerRun(pendingPlannerControl.run.id), pendingPlannerControl.action === "retry" ? "Retry added to the queue." : "Render cancelled.")
+          : undefined}
+      />
 
       {shouldShowAppUpdateToast ? (
         <AppUpdateToast

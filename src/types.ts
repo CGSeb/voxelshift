@@ -120,7 +120,11 @@ export interface BlenderSession extends RunningBlenderProcess {
   logs: BlenderLogEntry[];
 }
 
-export type PlannerRunStatus = "pending" | "running" | "completed" | "failed";
+export type PlannerRunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export interface PlannerQueueState {
+  paused: boolean;
+  pendingRunIds: string[];
+}
 export type PlannerBlenderSource = "library" | "custom";
 
 export interface PlannerBlenderTarget {

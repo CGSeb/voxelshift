@@ -22,6 +22,11 @@ const apiMocks = vi.hoisted(() => ({
   applyBlenderConfig: vi.fn(),
   cancelBlenderReleaseInstall: vi.fn(),
   createPlannerRun: vi.fn(),
+  cancelPlannerRun: vi.fn(),
+  retryPlannerRun: vi.fn(),
+  getPlannerQueue: vi.fn(),
+  setPlannerQueuePaused: vi.fn(),
+  reorderPlannerQueue: vi.fn(),
   deletePlannerRun: vi.fn(),
   updatePlannerRun: vi.fn(),
   getBlenderConfigs: vi.fn(),
@@ -227,6 +232,7 @@ describe("App edge coverage", () => {
     apiMocks.getLauncherState.mockResolvedValue(launcherState);
     apiMocks.getPlannerLogs.mockResolvedValue([]);
     apiMocks.getPlannerRuns.mockResolvedValue([]);
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: false, pendingRunIds: [] });
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
     apiMocks.refreshManagedBlenderExtensions.mockResolvedValue(1);
     apiMocks.getRunningBlenders.mockResolvedValue([]);

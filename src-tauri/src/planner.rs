@@ -27,6 +27,7 @@ pub(crate) enum PlannerRunStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,11 +154,21 @@ struct PlannerRunRecord {
 struct PlannerStoredState {
     #[serde(default)]
     runs: Vec<PlannerRunRecord>,
+    #[serde(default)]
+    queue: PlannerQueueState,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlannerQueueState {
+    paused: bool,
+    pending_run_ids: Vec<String>,
 }
 
 #[derive(Default)]
 struct PlannerState {
     runs: Vec<PlannerRunRecord>,
+    queue: PlannerQueueState,
     active_processes: BTreeMap<String, Arc<Mutex<Child>>>,
     dirty: bool,
     scheduler_started: bool,
@@ -167,6 +178,9 @@ struct PlannerState {
 #[derive(Clone, Default)]
 pub(crate) struct PlannerRegistry {
     inner: Arc<Mutex<PlannerState>>,
+    // Serialize lifecycle controls with launches and exits, and disk writes with each other.
+    controls: Arc<Mutex<()>>,
+    persistence: Arc<Mutex<()>>,
 }
 
 pub(crate) fn initialize<R: tauri::Runtime>(app: &AppHandle<R>, planner: &PlannerRegistry) -> Result<(), String> {
@@ -215,6 +229,8 @@ fn restore_running_runs(stored: &mut PlannerStoredState, restored_at: u64) -> bo
 
 fn replace_planner_state(state: &mut PlannerState, stored: PlannerStoredState, changed: bool) -> bool {
     state.runs = stored.runs;
+    state.queue = stored.queue;
+    normalize_queue(state);
     state.active_processes.clear();
     state.dirty = changed;
     state.next_scheduled_start_after = None;
@@ -240,11 +256,216 @@ pub(crate) fn get_planner_logs(
     planner_logs(planner.inner(), &run_id)
 }
 
+fn normalize_queue(state: &mut PlannerState) {
+    let mut pending: Vec<_> = state
+        .runs
+        .iter()
+        .filter(|run| run.status == PlannerRunStatus::Pending)
+        .collect();
+    pending.sort_by_key(|run| (run.start_at, run.created_at, run.id.clone()));
+    let mut ids = Vec::new();
+    for id in &state.queue.pending_run_ids {
+        if pending.iter().any(|run| &run.id == id) && !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    for run in pending {
+        if !ids.contains(&run.id) {
+            ids.push(run.id.clone());
+        }
+    }
+    state.queue.pending_run_ids = ids;
+}
+
+pub(crate) fn get_planner_queue(planner: &PlannerRegistry) -> Result<PlannerQueueState, String> {
+    let mut state = planner
+        .inner
+        .lock()
+        .map_err(|_| "Unable to access planner state.".to_string())?;
+    normalize_queue(&mut state);
+    Ok(state.queue.clone())
+}
+
+pub(crate) fn set_planner_queue_paused<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    planner: &PlannerRegistry,
+    paused: bool,
+) -> Result<PlannerQueueState, String> {
+    let _control = planner
+        .controls
+        .lock()
+        .map_err(|_| "Unable to control planner.".to_string())?;
+    {
+        let mut state = planner
+            .inner
+            .lock()
+            .map_err(|_| "Unable to access planner state.".to_string())?;
+        state.queue.paused = paused;
+        state.dirty = true;
+    }
+    save_if_dirty(app, planner)?;
+    emit_planner_runs_changed(app, planner);
+    get_planner_queue(planner)
+}
+
+fn reorder_queue_in_state(state: &mut PlannerState, run_ids: Vec<String>) -> Result<(), String> {
+    normalize_queue(state);
+    let mut expected = state.queue.pending_run_ids.clone();
+    let mut received = run_ids.clone();
+    expected.sort();
+    received.sort();
+    if expected != received {
+        return Err(
+            "Queue changed. Refresh and include every pending render exactly once.".to_string(),
+        );
+    }
+    state.queue.pending_run_ids = run_ids;
+    state.dirty = true;
+    Ok(())
+}
+
+pub(crate) fn reorder_planner_queue<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    planner: &PlannerRegistry,
+    run_ids: Vec<String>,
+) -> Result<PlannerQueueState, String> {
+    let _control = planner
+        .controls
+        .lock()
+        .map_err(|_| "Unable to control planner.".to_string())?;
+    {
+        let mut state = planner
+            .inner
+            .lock()
+            .map_err(|_| "Unable to access planner state.".to_string())?;
+        reorder_queue_in_state(&mut state, run_ids)?;
+    }
+    save_if_dirty(app, planner)?;
+    emit_planner_runs_changed(app, planner);
+    get_planner_queue(planner)
+}
+
+pub(crate) fn cancel_planner_run<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    planner: &PlannerRegistry,
+    run_id: String,
+) -> Result<(), String> {
+    cancel_planner_run_with(&TauriPlannerHost(app.clone()), planner, &run_id)
+}
+
+fn cancel_planner_run_with<H: PlannerHost>(
+    app: &H,
+    planner: &PlannerRegistry,
+    run_id: &str,
+) -> Result<(), String> {
+    let _control = planner
+        .controls
+        .lock()
+        .map_err(|_| "Unable to control planner.".to_string())?;
+    {
+        let mut state = planner
+            .inner
+            .lock()
+            .map_err(|_| "Unable to access planner state.".to_string())?;
+        let index = state
+            .runs
+            .iter()
+            .position(|run| run.id == run_id)
+            .ok_or_else(|| "That planner run could not be found.".to_string())?;
+        if !matches!(
+            state.runs[index].status,
+            PlannerRunStatus::Pending | PlannerRunStatus::Running
+        ) {
+            return Err("Only pending or running renders can be cancelled.".to_string());
+        }
+        if state.runs[index].status == PlannerRunStatus::Running {
+            let child = state
+                .active_processes
+                .get(run_id)
+                .ok_or_else(|| "The render process is unavailable.".to_string())?;
+            let mut child = child
+                .lock()
+                .map_err(|_| "Unable to access render process.".to_string())?;
+            if child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Err("This render has already finished. Refresh its status.".to_string());
+            }
+            child
+                .kill()
+                .map_err(|error| format!("Unable to cancel render: {error}"))?;
+        }
+        let run = &mut state.runs[index];
+        run.status = PlannerRunStatus::Cancelled;
+        run.completed_at = Some(current_timestamp());
+        run.current_frame_started_at = None;
+        run.last_error_message = None;
+        normalize_queue(&mut state);
+        state.dirty = true;
+    }
+    append_log_and_emit(app, planner, run_id, "system", "Render cancelled by user.")?;
+    app.save(planner)?;
+    app.runs_changed(planner);
+    Ok(())
+}
+
+fn retry_run_in_state(
+    state: &mut PlannerState,
+    run_id: &str,
+    now: u64,
+) -> Result<PlannerRunSummary, String> {
+    let run = state
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .ok_or_else(|| "That planner run could not be found.".to_string())?;
+    if !matches!(
+        run.status,
+        PlannerRunStatus::Failed | PlannerRunStatus::Cancelled
+    ) {
+        return Err("Only failed or cancelled renders can be retried.".to_string());
+    }
+    let request = ResolvedPlannerRunRequest {
+        blend_file_path: run.blend_file_path.clone(),
+        start_frame: run.start_frame,
+        end_frame: run.end_frame,
+        start_at: now,
+        output_folder_path: run.output_folder_path.clone(),
+        shutdown_when_done: run.shutdown_when_done,
+        blender_target: run.blender_target.clone(),
+    };
+    Ok(create_planner_run_in_state(state, request, now))
+}
+
+pub(crate) fn retry_planner_run<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    planner: &PlannerRegistry,
+    run_id: String,
+) -> Result<PlannerRunSummary, String> {
+    let _control = planner
+        .controls
+        .lock()
+        .map_err(|_| "Unable to control planner.".to_string())?;
+    let run = {
+        let mut state = planner
+            .inner
+            .lock()
+            .map_err(|_| "Unable to access planner state.".to_string())?;
+        retry_run_in_state(&mut state, &run_id, current_timestamp())?
+    };
+    save_if_dirty(app, planner)?;
+    emit_planner_runs_changed(app, planner);
+    Ok(run)
+}
+
 pub(crate) fn delete_planner_run<R: tauri::Runtime>(
     app: &AppHandle<R>,
     planner: &PlannerRegistry,
     run_id: String,
 ) -> Result<(), String> {
+    let _control = planner.controls.lock().map_err(|_| "Unable to control planner.".to_string())?;
     {
         let mut state = planner
             .inner
@@ -268,6 +489,7 @@ fn delete_planner_run_in_state(state: &mut PlannerState, run_id: &str) -> Result
     }
 
     state.runs.remove(index);
+    normalize_queue(state);
     state.dirty = true;
     Ok(())
 }
@@ -278,6 +500,7 @@ pub(crate) fn update_planner_run<R: tauri::Runtime>(
     run_id: String,
     request: ResolvedPlannerRunRequest,
 ) -> Result<PlannerRunSummary, String> {
+    let _control = planner.controls.lock().map_err(|_| "Unable to control planner.".to_string())?;
     let updated_run = {
         let mut state = planner
             .inner
@@ -337,6 +560,7 @@ pub(crate) fn create_planner_run<R: tauri::Runtime>(
     planner: &PlannerRegistry,
     request: ResolvedPlannerRunRequest,
 ) -> Result<PlannerRunSummary, String> {
+    let _control = planner.controls.lock().map_err(|_| "Unable to control planner.".to_string())?;
     let created_run = {
         let mut state = planner
             .inner
@@ -355,9 +579,17 @@ fn create_planner_run_in_state(
     request: ResolvedPlannerRunRequest,
     created_at: u64,
 ) -> PlannerRunSummary {
-    let run = planner_run_record(request, created_at);
+    let mut run = planner_run_record(request, created_at);
+    // Duplicates and retries can be submitted within the same second.
+    let base_id = run.id.clone();
+    let mut suffix = 1;
+    while state.runs.iter().any(|existing| existing.id == run.id) {
+        run.id = format!("{base_id}-{suffix}");
+        suffix += 1;
+    }
     let summary = summarize_run(&run, created_at);
     state.runs.push(run);
+    normalize_queue(state);
     state.dirty = true;
     summary
 }
@@ -459,16 +691,23 @@ pub(crate) fn pick_planner_output_folder() -> Result<Option<String>, String> {
 
 fn list_planner_runs(planner: &PlannerRegistry) -> Result<Vec<PlannerRunSummary>, String> {
     let now = current_timestamp();
-    let mut runs = planner
+    let state = planner
         .inner
         .lock()
-        .map_err(|_| "Unable to access planner state.".to_string())?
-        .runs
+        .map_err(|_| "Unable to access planner state.".to_string())?;
+    let mut runs = state.runs
         .iter()
         .map(|run| summarize_run(run, now))
         .collect::<Vec<_>>();
 
-    runs.sort_by(planner_run_summary_sort);
+    runs.sort_by(|left, right| {
+        if left.status == PlannerRunStatus::Pending && right.status == PlannerRunStatus::Pending {
+            queue_position(&state, &left.id).cmp(&queue_position(&state, &right.id))
+                .then_with(|| planner_run_summary_sort(left, right))
+        } else {
+            planner_run_summary_sort(left, right)
+        }
+    });
     Ok(runs)
 }
 
@@ -523,7 +762,8 @@ fn next_due_run_to_start(planner: &PlannerRegistry) -> Option<String> {
     let now = current_timestamp();
     let state = planner.inner.lock().ok()?;
 
-    if state.runs.iter().any(|run| run.status == PlannerRunStatus::Running) {
+    if state.queue.paused || !state.active_processes.is_empty()
+        || state.runs.iter().any(|run| run.status == PlannerRunStatus::Running) {
         return None;
     }
 
@@ -539,12 +779,17 @@ fn next_due_run_to_start(planner: &PlannerRegistry) -> Option<String> {
         .iter()
         .filter(|run| run.status == PlannerRunStatus::Pending && run.start_at <= now)
         .min_by(|left, right| {
-            left.start_at
+            queue_position(&state, &left.id).cmp(&queue_position(&state, &right.id))
+                .then_with(|| left.start_at
                 .cmp(&right.start_at)
                 .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.id.cmp(&right.id))
+                .then_with(|| left.id.cmp(&right.id)))
         })
         .map(|run| run.id.clone())
+}
+
+fn queue_position(state: &PlannerState, id: &str) -> usize {
+    state.queue.pending_run_ids.iter().position(|value| value == id).unwrap_or(usize::MAX)
 }
 
 fn has_pending_or_running_runs(planner: &PlannerRegistry) -> bool {
@@ -589,6 +834,7 @@ trait PlannerHost: Clone + Send + Sync + 'static {
     fn runs_changed(&self, planner: &PlannerRegistry);
     fn log(&self, payload: PlannerLogEventPayload);
     fn shutdown(&self) -> Result<(), String>;
+    fn finished(&self, run: PlannerRunSummary);
 }
 
 struct TauriPlannerHost<R: tauri::Runtime>(AppHandle<R>);
@@ -615,6 +861,20 @@ impl<R: tauri::Runtime> PlannerHost for TauriPlannerHost<R> {
     fn shutdown(&self) -> Result<(), String> {
         schedule_system_shutdown()
     }
+
+    fn finished(&self, run: PlannerRunSummary) {
+        use tauri_plugin_notification::NotificationExt;
+        let title = if run.status == PlannerRunStatus::Completed { "Render completed" } else { "Render failed" };
+        let filename = Path::new(&run.blend_file_path).file_name().unwrap_or_default().to_string_lossy();
+        let body = match run.last_error_message.as_deref() {
+            Some(error) => format!("{filename}: {error}"),
+            None => format!("{filename} — frames {}–{}", run.start_frame, run.end_frame),
+        };
+        let _ = self.0.emit("planner-run-finished", &run);
+        if let Err(error) = self.0.notification().builder().title(title).body(body).show() {
+            eprintln!("Unable to show render notification: {error}");
+        }
+    }
 }
 
 fn start_due_run_with<H: PlannerHost>(
@@ -622,11 +882,17 @@ fn start_due_run_with<H: PlannerHost>(
     planner: &PlannerRegistry,
     run_id: &str,
 ) -> Result<(), String> {
+    let _control = planner.controls.lock().map_err(|_| "Unable to control planner.".to_string())?;
     let run = {
         let state = planner
             .inner
             .lock()
             .map_err(|_| "Unable to access planner state.".to_string())?;
+        if state.queue.paused || !state.active_processes.is_empty()
+            || state.runs.iter().any(|run| run.status == PlannerRunStatus::Running)
+            || state.next_scheduled_start_after.is_some_and(|after| current_timestamp() < after) {
+            return Ok(());
+        }
         state
             .runs
             .iter()
@@ -635,7 +901,11 @@ fn start_due_run_with<H: PlannerHost>(
             .ok_or_else(|| "That planner run could not be found.".to_string())?
     };
 
-    if run.status != PlannerRunStatus::Pending {
+    if run.status != PlannerRunStatus::Pending || run.start_at > current_timestamp() {
+        return Ok(());
+    }
+    // A control may have reordered the queue after the scheduler chose this ID.
+    if next_due_run_to_start(planner).as_deref() != Some(run_id) {
         return Ok(());
     }
 
@@ -711,16 +981,18 @@ fn start_due_run_with<H: PlannerHost>(
         stored_run.current_frame_started_at = None;
         stored_run.rendered_frame_count = 0;
         state.active_processes.insert(run_id.to_string(), child.clone());
+        normalize_queue(&mut state);
         state.next_scheduled_start_after = None;
         state.dirty = true;
     }
 
-    app.save(planner)?;
-    app.runs_changed(planner);
-    append_log_and_emit(app, planner, run_id, "system", "Scheduled render started.")?;
+    // Install supervision before fallible persistence so a disk error never orphans Blender.
     spawn_log_reader(app.clone(), planner.clone(), run_id.to_string(), "stdout", stdout);
     spawn_log_reader(app.clone(), planner.clone(), run_id.to_string(), "stderr", stderr);
     spawn_process_monitor(app.clone(), planner.clone(), run_id.to_string(), child);
+    append_log_and_emit(app, planner, run_id, "system", "Scheduled render started.")?;
+    app.runs_changed(planner);
+    app.save(planner)?;
     Ok(())
 }
 
@@ -739,13 +1011,24 @@ fn fail_run_before_start<H: PlannerHost>(
             return Err("That planner run could not be found.".to_string());
         };
 
-        mark_run_failed(run, current_timestamp(), message);
+        if run.status == PlannerRunStatus::Cancelled {
+            run.pid = None;
+        } else {
+            mark_run_failed(run, current_timestamp(), message);
+        }
+        state.active_processes.remove(run_id);
+        normalize_queue(&mut state);
         state.dirty = true;
     }
 
     append_log_and_emit(app, planner, run_id, "system", message)?;
-    app.save(planner)?;
     app.runs_changed(planner);
+    if let Ok(runs) = list_planner_runs(planner) {
+        if let Some(run) = runs.into_iter().find(|run| run.id == run_id && run.status == PlannerRunStatus::Failed) {
+            app.finished(run);
+        }
+    }
+    app.save(planner)?;
     Ok(())
 }
 
@@ -825,8 +1108,15 @@ fn process_run_exit_in_state(
         return Err("That planner run could not be found.".to_string());
     };
 
-    let should_shutdown = succeeded && run.shutdown_when_done;
-    let exit_message = finalize_run_after_exit(run, completed_at, exit_code, succeeded);
+    let cancelled = run.status == PlannerRunStatus::Cancelled;
+    let should_shutdown = !cancelled && succeeded && run.shutdown_when_done;
+    let exit_message = if cancelled {
+        run.pid = None;
+        run.exit_code = exit_code;
+        "Cancelled render process stopped.".to_string()
+    } else {
+        finalize_run_after_exit(run, completed_at, exit_code, succeeded)
+    };
     state.active_processes.remove(run_id);
     state.next_scheduled_start_after =
         Some(completed_at.saturating_add(PLANNER_NEXT_RUN_DELAY_SECONDS));
@@ -851,17 +1141,25 @@ fn spawn_process_monitor<H: PlannerHost>(
                 Err(_) => break,
             };
 
-            match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    let message = format!("Unable to monitor Blender: {error}");
-                    let _ = fail_run_before_start(&app, &planner, &run_id, &message);
-                    break;
+            child.try_wait()
+        };
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                let _control = match planner.controls.lock() { Ok(control) => control, Err(_) => break };
+                // Release the child lock before acquiring planner state, as cancellation does.
+                if let Ok(mut process) = child.lock() {
+                    let _ = process.kill();
+                    let _ = process.wait();
                 }
+                let message = format!("Unable to monitor Blender: {error}");
+                let _ = fail_run_before_start(&app, &planner, &run_id, &message);
+                break;
             }
         };
 
         if let Some(status) = status {
+            let _control = match planner.controls.lock() { Ok(control) => control, Err(_) => break };
             let completed_at = current_timestamp();
             let outcome = {
                 let mut state = match planner.inner.lock() {
@@ -892,6 +1190,13 @@ fn spawn_process_monitor<H: PlannerHost>(
             }
             let _ = app.save(&planner);
             app.runs_changed(&planner);
+            if let Ok(runs) = list_planner_runs(&planner) {
+                if let Some(run) = runs.into_iter().find(|run| run.id == run_id) {
+                    if matches!(run.status, PlannerRunStatus::Completed | PlannerRunStatus::Failed) {
+                        app.finished(run);
+                    }
+                }
+            }
             break;
         }
 
@@ -937,7 +1242,7 @@ fn append_log_to_run(run: &mut PlannerRunRecord, source: &str, message: &str) ->
     let log_timestamp = current_timestamp();
 
     if let Some(frame) = parse_frame_number(message) {
-        if frame >= run.start_frame && frame <= run.end_frame {
+        if run.status == PlannerRunStatus::Running && frame >= run.start_frame && frame <= run.end_frame {
             if run.current_frame.map_or(true, |current_frame| frame > current_frame) {
                 run.current_frame = Some(frame);
                 run.current_frame_started_at = Some(log_timestamp);
@@ -1037,7 +1342,7 @@ fn planner_run_summary_sort(left: &PlannerRunSummary, right: &PlannerRunSummary)
         .then_with(|| match left.status {
             PlannerRunStatus::Pending => left.start_at.cmp(&right.start_at),
             PlannerRunStatus::Running => right.started_at.unwrap_or(0).cmp(&left.started_at.unwrap_or(0)),
-            PlannerRunStatus::Completed | PlannerRunStatus::Failed => {
+            PlannerRunStatus::Completed | PlannerRunStatus::Failed | PlannerRunStatus::Cancelled => {
                 right.completed_at.unwrap_or(0).cmp(&left.completed_at.unwrap_or(0))
             }
         })
@@ -1050,12 +1355,16 @@ fn planner_status_rank(status: &PlannerRunStatus) -> u8 {
         PlannerRunStatus::Pending => 1,
         PlannerRunStatus::Failed => 2,
         PlannerRunStatus::Completed => 3,
+        PlannerRunStatus::Cancelled => 4,
     }
 }
 
 fn emit_planner_runs_changed<R: tauri::Runtime>(app: &AppHandle<R>, planner: &PlannerRegistry) {
     if let Ok(runs) = list_planner_runs(planner) {
         let _ = app.emit(PLANNER_RUNS_EVENT, runs);
+    }
+    if let Ok(queue) = get_planner_queue(planner) {
+        let _ = app.emit("planner-queue-updated", queue);
     }
 }
 
@@ -1070,8 +1379,9 @@ fn take_dirty_runs(state: &mut PlannerState) -> Option<Vec<PlannerRunRecord>> {
 
 fn save_if_dirty_with<F>(planner: &PlannerRegistry, mut save_runs: F) -> Result<(), String>
 where
-    F: FnMut(&[PlannerRunRecord]) -> Result<(), String>,
+    F: FnMut(&PlannerStoredState) -> Result<(), String>,
 {
+    let _persistence = planner.persistence.lock().map_err(|_| "Unable to save planner state.".to_string())?;
     let runs = {
         let mut state = planner
             .inner
@@ -1079,7 +1389,7 @@ where
             .map_err(|_| "Unable to access planner state.".to_string())?;
 
         match take_dirty_runs(&mut state) {
-            Some(runs) => runs,
+            Some(runs) => PlannerStoredState { runs, queue: state.queue.clone() },
             None => return Ok(()),
         }
     };
@@ -1114,7 +1424,7 @@ fn load_planner_state<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PlannerSt
     load_planner_state_from_path(&file_path)
 }
 
-fn save_planner_state_to_path(file_path: &Path, runs: &[PlannerRunRecord]) -> Result<(), String> {
+fn save_planner_state_to_path(file_path: &Path, state: &PlannerStoredState) -> Result<(), String> {
     let directory = file_path
         .parent()
         .ok_or_else(|| "Unable to access application data directory.".to_string())?;
@@ -1122,9 +1432,6 @@ fn save_planner_state_to_path(file_path: &Path, runs: &[PlannerRunRecord]) -> Re
     fs::create_dir_all(directory)
         .map_err(|error| format!("Unable to prepare planner data directory: {error}"))?;
 
-    let state = PlannerStoredState {
-        runs: runs.to_vec(),
-    };
     let json = serde_json::to_string_pretty(&state)
         .map_err(|error| format!("Unable to serialize planner state: {error}"))?;
 
@@ -1133,7 +1440,7 @@ fn save_planner_state_to_path(file_path: &Path, runs: &[PlannerRunRecord]) -> Re
 
 fn save_planner_state<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    runs: &[PlannerRunRecord],
+    runs: &PlannerStoredState,
 ) -> Result<(), String> {
     let file_path = planner_state_file_path(app)?;
     save_planner_state_to_path(&file_path, runs)
@@ -1382,6 +1689,13 @@ pub(crate) fn pick_windows_folder(_title: &str) -> Result<Option<String>, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("planner_control_tests.rs");
+
+    mod app_controls {
+        use super::*;
+        include!("planner_app_tests.rs");
+    }
 
     mod processes {
         use super::*;
@@ -1964,6 +2278,7 @@ mod tests {
     fn restore_and_replace_helpers_handle_scheduler_state() {
         let mut stored = PlannerStoredState {
             runs: vec![test_run(Vec::new())],
+            ..PlannerStoredState::default()
         };
 
         assert!(restore_running_runs(&mut stored, 500));
@@ -2131,7 +2446,7 @@ mod tests {
 
         let mut saved_count = 0;
         save_if_dirty_with(&registry, |runs| {
-            saved_count = runs.len();
+            saved_count = runs.runs.len();
             Ok(())
         })
         .unwrap();
@@ -2172,7 +2487,7 @@ mod tests {
             message: "Queued".to_string(),
             timestamp: 124,
         });
-        save_planner_state_to_path(&state_file, &[run.clone()]).unwrap();
+        save_planner_state_to_path(&state_file, &PlannerStoredState { runs: vec![run.clone()], ..PlannerStoredState::default() }).unwrap();
         let loaded = load_planner_state_from_path(&state_file).unwrap();
         assert_eq!(loaded.runs.len(), 1);
         assert_eq!(loaded.runs[0].id, run.id);

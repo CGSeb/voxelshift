@@ -2963,3 +2963,12 @@ select.release-config-input option {
 .mcp-connection-details { display: grid; gap: 12px; }
 .mcp-connection-details p { margin: 0; }
 .mcp-connection-details button { justify-self: start; }
+
+.planner-queue-notice { padding: 12px 16px; border: 1px solid #786640; border-radius: 10px; color: #f3cf82; background: #2b2519; }
+.planner-status-dot-cancelled { background: #9b9b9b; }
+.planner-status-pill-cancelled { color: #bbb; }
+.planner-notifications { position: fixed; right: 24px; bottom: 76px; z-index: 50; display: grid; gap: 12px; max-height: calc(100vh - 120px); overflow-y: auto; width: min(380px, calc(100vw - 48px)); }
+.planner-notification { padding: 18px; border: 1px solid rgba(var(--accent-rgb), 0.5); border-radius: 14px; background: #171d19; box-shadow: 0 12px 32px #0008; }
+.planner-notification-failed { border-color: #a94f4f; background: #241919; }
+.planner-notification p { margin: 8px 0 14px; overflow-wrap: anywhere; }
+.planner-run-actions { flex-wrap: wrap; }

@@ -9,6 +9,7 @@ import type {
   LauncherState,
   PlannerLogEntry,
   PlannerRunSummary,
+  PlannerQueueState,
   RecentProject,
   RunningBlenderProcess,
 } from "../types";
@@ -186,6 +187,26 @@ export function removeBlenderConfig(configId: string) {
 
 export function getPlannerRuns() {
   return invoke<PlannerRunSummary[]>("get_planner_runs");
+}
+
+export function getPlannerQueue() {
+  return invoke<PlannerQueueState>("get_planner_queue");
+}
+
+export function setPlannerQueuePaused(paused: boolean) {
+  return invoke<PlannerQueueState>("set_planner_queue_paused", { paused });
+}
+
+export function reorderPlannerQueue(runIds: string[]) {
+  return invoke<PlannerQueueState>("reorder_planner_queue", { runIds });
+}
+
+export function cancelPlannerRun(runId: string) {
+  return invoke<void>("cancel_planner_run", { runId });
+}
+
+export function retryPlannerRun(runId: string) {
+  return invoke<PlannerRunSummary>("retry_planner_run", { runId });
 }
 
 export function getPlannerLogs(runId: string) {

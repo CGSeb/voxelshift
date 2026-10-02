@@ -7,7 +7,7 @@ The endpoint runs while Voxel Shift is open and stops when the app exits.
 
 ## Available tools
 
-The server exposes 35 tools using the same backend operations and validation as
+The server exposes 40 tools using the same backend operations and validation as
 the app. Changes update the launcher, recent projects, config library, running
 sessions, install progress, and planner UI.
 
@@ -17,13 +17,24 @@ sessions, install progress, and planner UI.
 | Projects and sessions | `get_recent_projects`, `remove_recent_project`, `launch_blender`, `launch_blender_project`, `get_running_blenders`, `get_running_blender_logs`, `stop_running_blender` |
 | Releases and installation | `get_blender_lts_release_lines`, `get_blender_release_downloads`, `install_blender_release`, `cancel_blender_release_install`, `get_install_migration_folders`, `get_install_migration_links`, `refresh_managed_blender_extensions` |
 | Portable configurations | `get_blender_configs`, `save_blender_config`, `apply_blender_config`, `remove_blender_config` |
-| Render planner | `get_planner_runs`, `get_planner_logs`, `create_planner_run`, `update_planner_run`, `delete_planner_run` |
+| Render planner | `get_planner_runs`, `get_planner_logs`, `create_planner_run`, `update_planner_run`, `delete_planner_run`, `get_planner_queue`, `set_planner_queue_paused`, `reorder_planner_queue`, `cancel_planner_run`, `retry_planner_run` |
 | Native file pickers | `pick_planner_blend_file`, `pick_planner_blender_executable`, `pick_planner_output_folder`, `pick_install_migration_folder` |
 
 MCP connection settings and the access token remain local to the settings modal.
 App updates and UI-only preferences such as favorites/navigation are not MCP tools.
-The planner backend does not support canceling a running render: deleting a pending
-job removes it from the schedule, while deleting a running job is rejected.
+`cancel_planner_run` stops a pending or running job and keeps its history and outputs
+already written. `retry_planner_run` creates a new attempt from a failed/cancelled job,
+starting from its first frame now with the same settings. It may overwrite outputs;
+if the original job has `shutdownWhenDone: true`, confirm that behavior before retrying.
+Deleting a running job is rejected; cancel it first and wait for its process to stop.
+
+`get_planner_queue` returns `paused` and ordered `pendingRunIds`.
+`set_planner_queue_paused` accepts `{ "paused": true }` (or `false` to resume); the
+current render continues. `reorder_planner_queue` accepts `{ "runIds": [...] }`,
+including every pending ID exactly once. Refresh the queue before reordering; stale,
+duplicate or missing IDs are rejected. Queue order and pause state persist across
+restarts. Among jobs whose scheduled time has arrived, queue priority determines
+the next render; a future job never blocks due jobs.
 
 ### Tool arguments
 
