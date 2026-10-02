@@ -37,11 +37,13 @@ Monitor Blender sessions launched through Voxel Shift, view their logs, and stop
 
 Schedule animation renders with a frame range, start time, Blender version, and optional output folder. Track progress, estimated time remaining, and logs; edit pending jobs and duplicate existing jobs.
 
-Jobs run sequentially while Voxel Shift is open. Cancelling a running render is not yet supported. Native file/folder pickers and optional shutdown after rendering are currently Windows-only.
+Jobs run sequentially while Voxel Shift is open. Cancel pending or running renders, retry failed or cancelled renders, pause/resume the queue, and move pending jobs up or down. Pausing lets the current render finish. Queue order and pause state survive restarts; scheduled times remain the earliest allowed start, so future jobs do not block ready jobs.
+
+Retries start from the first frame with the same settings and keep the original history; existing outputs may be overwritten. Completion and failure produce notifications in the app and native desktop notifications (subject to system notification settings; Windows native notifications require an installed app). Native file/folder pickers and optional shutdown after rendering are currently Windows-only.
 
 ### MCP integration
 
-The embedded local MCP server provides **35 tools** for managing Blender versions, projects, sessions, installations, configurations, and render jobs. Actions performed by a client also update the app UI.
+The embedded local MCP server provides **40 tools** for managing Blender versions, projects, sessions, installations, configurations, and render jobs. Actions performed by a client also update the app UI.
 
 Click **MCP** in the bottom bar to enable the server and configure its port. Connect a compatible local client using the URL and access token shown in the settings. Voxel Shift must remain open.
 
@@ -51,7 +53,7 @@ See the [MCP guide](mcp/README.md) for setup, supported tools, and troubleshooti
 
 Planned priorities, in order; scope and timing may change:
 
-1. **Render control:** cancel and retry renders, pause and reorder the queue, and add completion/failure notifications.
+1. **Render control (implemented):** cancel and retry renders, pause and reorder the queue, and add completion/failure notifications.
 2. **Installation and migration recovery:** resume interrupted downloads, back up configurations, support rollback, and detect broken extension links.
 3. **MCP usability:** expose progress for long operations, test connections, and add token regeneration and access controls.
 4. **Background operation:** keep scheduled work running when the window closes and improve recovery after app restarts.

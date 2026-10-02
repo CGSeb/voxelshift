@@ -26,6 +26,11 @@ const apiMocks = vi.hoisted(() => ({
   applyBlenderConfig: vi.fn(),
   cancelBlenderReleaseInstall: vi.fn(),
   createPlannerRun: vi.fn(),
+  cancelPlannerRun: vi.fn(),
+  retryPlannerRun: vi.fn(),
+  getPlannerQueue: vi.fn(),
+  setPlannerQueuePaused: vi.fn(),
+  reorderPlannerQueue: vi.fn(),
   deletePlannerRun: vi.fn(),
   updatePlannerRun: vi.fn(),
   getBlenderConfigs: vi.fn(),
@@ -262,6 +267,7 @@ describe("App", () => {
     apiMocks.getMcpSettings.mockResolvedValue({ enabled: false, running: false, port: 47831, token: "test-token", error: null });
     apiMocks.getPlannerLogs.mockResolvedValue([plannerLog]);
     apiMocks.getPlannerRuns.mockResolvedValue([]);
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: false, pendingRunIds: [] });
     apiMocks.getRecentProjects.mockResolvedValue([recentProject]);
     apiMocks.refreshManagedBlenderExtensions.mockResolvedValue(1);
     apiMocks.getRunningBlenders.mockResolvedValue([]);
@@ -287,6 +293,183 @@ describe("App", () => {
     apiMocks.updatePlannerRun.mockResolvedValue(updatedPlannerRun);
     apiMocks.removeRecentProject.mockResolvedValue([]);
     apiMocks.removeBlenderVersion.mockResolvedValue({ ...launcherState, versions: [] });
+  });
+
+  it("pauses and resumes the queue and reflects MCP queue changes", async () => {
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    await waitFor(() => expect(apiMocks.getPlannerQueue).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: true, pendingRunIds: [] });
+    apiMocks.setPlannerQueuePaused.mockResolvedValue({ paused: true, pendingRunIds: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Pause queue" }));
+    await screen.findByRole("button", { name: "Resume queue" });
+    expect(apiMocks.setPlannerQueuePaused).toHaveBeenCalledWith(true);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Resume queue" })).toBeEnabled());
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: false, pendingRunIds: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Resume queue" }));
+    await screen.findByRole("button", { name: "Pause queue" });
+    expect(apiMocks.setPlannerQueuePaused).toHaveBeenLastCalledWith(false);
+    act(() => emitTauriEvent("planner-queue-updated", { paused: true, pendingRunIds: [] }));
+    expect(screen.getByRole("button", { name: "Resume queue" })).toBeInTheDocument();
+  });
+
+  it("keeps a live queue update when an older initial snapshot arrives later", async () => {
+    const snapshot = createDeferred<{ paused: boolean; pendingRunIds: string[] }>();
+    apiMocks.getPlannerQueue.mockReturnValueOnce(snapshot.promise);
+    render(<App />);
+    await waitFor(() => expect(apiMocks.getPlannerQueue).toHaveBeenCalled());
+    act(() => emitTauriEvent("planner-queue-updated", { paused: true, pendingRunIds: [plannerRun.id] }));
+    await act(async () => snapshot.resolve({ paused: false, pendingRunIds: [] }));
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    expect(await screen.findByRole("button", { name: "Resume queue" })).toBeInTheDocument();
+  });
+
+  it("reports queue subscription failures", async () => {
+    tauriMocks.listen.mockImplementation(async (name: string) => {
+      if (name === "planner-queue-updated") throw new Error("Queue subscription unavailable");
+      return vi.fn();
+    });
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    expect(await screen.findByText("Queue subscription unavailable")).toBeInTheDocument();
+  });
+
+  it.each(["planner-queue-updated", "planner-run-finished"])("releases a late %s subscription after unmount", async (eventName) => {
+    const subscription = createDeferred<() => void>();
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockImplementation((name: string) => name === eventName ? subscription.promise : Promise.resolve(vi.fn()));
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledWith(eventName, expect.any(Function)));
+    unmount();
+    await act(async () => subscription.resolve(unlisten));
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(apiMocks.getPlannerQueue).not.toHaveBeenCalled();
+  });
+
+  it("disables queue controls until an in-flight pause completes", async () => {
+    const operation = createDeferred<void>();
+    apiMocks.setPlannerQueuePaused.mockReturnValueOnce(operation.promise);
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Pause queue" }));
+    expect(screen.getByRole("button", { name: "Pause queue" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Pause queue" }));
+    expect(apiMocks.setPlannerQueuePaused).toHaveBeenCalledOnce();
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: true, pendingRunIds: [] });
+    await act(async () => operation.resolve());
+    expect(await screen.findByRole("button", { name: "Resume queue" })).toBeEnabled();
+  });
+
+  it("reorders the pending queue and exposes failures without announcing success", async () => {
+    const second = { ...plannerRun, id: "second", blendFilePath: "D:/second.blend" };
+    apiMocks.getPlannerRuns.mockResolvedValue([plannerRun, second]);
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: false, pendingRunIds: [plannerRun.id, second.id] });
+    apiMocks.reorderPlannerQueue.mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Move second.blend up" }));
+    await screen.findByText("Queue order updated.");
+    expect(apiMocks.reorderPlannerQueue).toHaveBeenCalledWith([second.id, plannerRun.id]);
+    apiMocks.setPlannerQueuePaused.mockRejectedValueOnce({});
+    fireEvent.click(screen.getByRole("button", { name: "Pause queue" }));
+    expect(await screen.findByText("Could not control this render queue.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pause queue" })).toBeEnabled();
+    expect(screen.queryByText("Queue paused.")).not.toBeInTheDocument();
+  });
+
+  it("dismisses retry confirmation without starting another render", async () => {
+    apiMocks.getPlannerRuns.mockResolvedValue([{ ...plannerRun, status: "cancelled" }]);
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry render-scene.blend" }));
+    expect(screen.getByRole("alertdialog")).not.toHaveTextContent("shut down the computer");
+    fireEvent.click(screen.getByRole("button", { name: "Keep it" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(apiMocks.retryPlannerRun).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates finished notifications, limits their history, and opens their logs", async () => {
+    render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledWith("planner-run-finished", expect.any(Function)));
+    act(() => {
+      for (let index = 0; index < 7; index++) {
+        emitTauriEvent("planner-run-finished", { ...plannerRun, id: `run-${index}`, blendFilePath: `D:/scene-${index}.blend`, status: "completed" });
+      }
+      emitTauriEvent("planner-run-finished", { ...plannerRun, id: "run-6", blendFilePath: "D:/scene-6.blend", status: "failed", lastErrorMessage: "Output unavailable" });
+    });
+    const notifications = screen.getByRole("complementary", { name: "Render notifications" });
+    expect(within(notifications).getAllByRole("button", { name: "View render logs" })).toHaveLength(5);
+    expect(within(notifications).queryByText("scene-1.blend")).not.toBeInTheDocument();
+    expect(within(notifications).getAllByText("scene-6.blend")).toHaveLength(1);
+    fireEvent.click(within(within(notifications).getByRole("alert")).getByRole("button", { name: "View render logs" }));
+    expect(await screen.findByRole("dialog", { name: "scene-6.blend" })).toBeInTheDocument();
+    expect(apiMocks.getPlannerLogs).toHaveBeenCalledWith("run-6");
+  });
+
+  it("confirms cancellation of an active render and refreshes its terminal status", async () => {
+    apiMocks.getPlannerRuns.mockResolvedValue([{ ...plannerRun, status: "running", pid: 4242 }]);
+    apiMocks.cancelPlannerRun.mockResolvedValue(undefined);
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel render-scene.blend" }));
+    expect(apiMocks.cancelPlannerRun).not.toHaveBeenCalled();
+    expect(screen.getByText(/Frames already written to disk will be kept/)).toBeInTheDocument();
+    apiMocks.getPlannerRuns.mockResolvedValue([{ ...plannerRun, status: "cancelled" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel render" }));
+    await screen.findByText("Cancelled");
+    expect(apiMocks.cancelPlannerRun).toHaveBeenCalledWith(plannerRun.id);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed cancel confirmation open and displays the backend error", async () => {
+    apiMocks.getPlannerRuns.mockResolvedValue([plannerRun]);
+    apiMocks.cancelPlannerRun.mockRejectedValue(new Error("Unable to stop process"));
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel render-scene.blend" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel render" }));
+    await waitFor(() => expect(within(screen.getByRole("alertdialog")).getByText("Unable to stop process")).toBeInTheDocument());
+  });
+
+  it("confirms retry output replacement and inherited shutdown before creating a new attempt", async () => {
+    apiMocks.getPlannerRuns.mockResolvedValue([{ ...plannerRun, status: "failed", shutdownWhenDone: true }]);
+    apiMocks.retryPlannerRun.mockResolvedValue({ ...plannerRun, id: "retry-1" });
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    fireEvent.click(screen.getByRole("button", { name: "Planner" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry render-scene.blend" }));
+    expect(screen.getByText(/Existing output files may be overwritten/)).toBeInTheDocument();
+    expect(screen.getByText(/shut down the computer/)).toBeInTheDocument();
+    expect(apiMocks.retryPlannerRun).not.toHaveBeenCalled();
+    apiMocks.getPlannerRuns.mockResolvedValue([{ ...plannerRun, id: "retry-1" }, { ...plannerRun, status: "failed" }]);
+    apiMocks.getPlannerQueue.mockResolvedValue({ paused: false, pendingRunIds: ["retry-1"] });
+    fireEvent.click(screen.getByRole("button", { name: "Retry render" }));
+    await screen.findByText("Retry added to the queue.");
+    expect(apiMocks.retryPlannerRun).toHaveBeenCalledWith(plannerRun.id);
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("shows completion and failure notifications from any page and can dismiss them", async () => {
+    render(<App />);
+    await screen.findByText("Continue where you left off");
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledWith("planner-run-finished", expect.any(Function)));
+    act(() => emitTauriEvent("planner-run-finished", { ...plannerRun, status: "completed" }));
+    const notifications = screen.getByRole("complementary", { name: "Render notifications" });
+    expect(within(notifications).getByText("Render completed")).toBeInTheDocument();
+    act(() => emitTauriEvent("planner-run-finished", { ...plannerRun, id: "failure-2", status: "failed", lastErrorMessage: "Blender crashed" }));
+    expect(within(notifications).getByRole("alert")).toHaveTextContent("Blender crashed");
+    expect(within(notifications).getAllByRole("button", { name: "View render logs" })).toHaveLength(2);
+    fireEvent.click(within(notifications).getAllByRole("button", { name: "Dismiss notification for render-scene.blend" })[0]);
+    expect(within(notifications).queryByText("Render completed")).not.toBeInTheDocument();
+    expect(within(notifications).getByText("Render failed")).toBeInTheDocument();
   });
 
   it("loads the home page and migrates legacy favorites after opening releases", async () => {

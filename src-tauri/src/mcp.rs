@@ -911,7 +911,7 @@ mod tests {
         .await;
         assert_eq!(
             tools["result"]["tools"].as_array().unwrap().len(),
-            35,
+            40,
             "{tools}"
         );
         let (_, result) = rpc(&client, &url, &token, json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_launcher_state","arguments":{}}})).await;

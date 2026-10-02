@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, FileCode, FolderOpen, Pencil, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, FileCode, FolderOpen, Pause, Pencil, Play, RotateCcw, Square, Trash2 } from "lucide-react";
 import { Tooltip } from "../components/Tooltip";
 import type { CreatePlannerRunPayload } from "../lib/api";
 import type { BlenderVersion, PlannerRunSummary } from "../types";
@@ -19,6 +19,12 @@ interface PlannerPageProps {
   onBrowseOutputFolder: () => Promise<string | null>;
   onOpenLogs: (run: PlannerRunSummary) => void;
   onDeleteRun: (run: PlannerRunSummary) => void;
+  queuePaused?: boolean;
+  isControlling?: boolean;
+  onToggleQueuePaused?: () => void;
+  onReorderQueue?: (runIds: string[]) => void;
+  onCancelRun?: (run: PlannerRunSummary) => void;
+  onRetryRun?: (run: PlannerRunSummary) => void;
 }
 
 const weekdayFormatter = new Intl.DateTimeFormat(undefined, { weekday: "short" });
@@ -154,6 +160,8 @@ function getStatusLabel(status: PlannerRunSummary["status"]) {
       return "Running";
     case "completed":
       return "Completed";
+    case "cancelled":
+      return "Cancelled";
     default:
       return "Failed";
   }
@@ -211,7 +219,22 @@ export function PlannerPage({
   onBrowseOutputFolder,
   onOpenLogs,
   onDeleteRun,
+  queuePaused = false,
+  isControlling = false,
+  onToggleQueuePaused,
+  onReorderQueue,
+  onCancelRun,
+  onRetryRun,
 }: PlannerPageProps) {
+  const pendingRunIds = plannerRuns.filter((run) => run.status === "pending").map((run) => run.id);
+  function moveRun(runId: string, offset: number) {
+    const ids = [...pendingRunIds];
+    const index = ids.indexOf(runId);
+    const destination = index + offset;
+    if (index < 0 || destination < 0 || destination >= ids.length) return;
+    [ids[index], ids[destination]] = [ids[destination], ids[index]];
+    onReorderQueue?.(ids);
+  }
   const [blendFilePath, setBlendFilePath] = useState("");
   const [startFrame, setStartFrame] = useState("1");
   const [endFrame, setEndFrame] = useState("250");
@@ -492,10 +515,18 @@ export function PlannerPage({
             <p className="section-kicker">Queue</p>
             <h3>Planned and past renders</h3>
           </div>
-          <button className="card-action card-action-secondary" type="button" onClick={() => openScheduleModal()}>
-            Schedule
-          </button>
+          <div className="planner-run-actions">
+            {onToggleQueuePaused ? (
+              <button className="card-action card-action-secondary card-action-inline" type="button" onClick={onToggleQueuePaused} disabled={isControlling}>
+                {queuePaused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
+                {queuePaused ? "Resume queue" : "Pause queue"}
+              </button>
+            ) : null}
+            <button className="card-action card-action-secondary" type="button" onClick={() => openScheduleModal()}>Schedule</button>
+          </div>
         </div>
+        {queuePaused ? <p className="planner-queue-notice" role="status">Queue paused. The current render continues; pending renders will wait until you resume.</p> : null}
+        {noticeMessage ? <p role="status">{noticeMessage}</p> : null}
 
         {isLoading && plannerRuns.length === 0 ? (
           <section className="release-state">
@@ -522,6 +553,26 @@ export function PlannerPage({
                     <p>{run.blenderTarget.displayName}</p>
                   </div>
                   <div className="planner-run-actions">
+                    {run.status === "pending" && onReorderQueue ? (
+                      <>
+                        <Tooltip content="Move up in queue">
+                          <button className="running-blender-action-button" type="button" aria-label={`Move ${formatRunName(run)} up`} disabled={isControlling || pendingRunIds.indexOf(run.id) === 0} onClick={() => moveRun(run.id, -1)}><ArrowUp size={16} aria-hidden="true" /></button>
+                        </Tooltip>
+                        <Tooltip content="Move down in queue">
+                          <button className="running-blender-action-button" type="button" aria-label={`Move ${formatRunName(run)} down`} disabled={isControlling || pendingRunIds.indexOf(run.id) === pendingRunIds.length - 1} onClick={() => moveRun(run.id, 1)}><ArrowDown size={16} aria-hidden="true" /></button>
+                        </Tooltip>
+                      </>
+                    ) : null}
+                    {(run.status === "pending" || run.status === "running") && onCancelRun ? (
+                      <Tooltip content="Cancel render">
+                        <button className="running-blender-action-button running-blender-action-button-danger" type="button" aria-label={`Cancel ${formatRunName(run)}`} disabled={isControlling} onClick={() => onCancelRun(run)}><Square size={16} aria-hidden="true" /></button>
+                      </Tooltip>
+                    ) : null}
+                    {(run.status === "failed" || run.status === "cancelled") && onRetryRun ? (
+                      <Tooltip content="Retry render from the first frame">
+                        <button className="running-blender-action-button" type="button" aria-label={`Retry ${formatRunName(run)}`} disabled={isControlling || run.pid !== null} onClick={() => onRetryRun(run)}><RotateCcw size={16} aria-hidden="true" /></button>
+                      </Tooltip>
+                    ) : null}
                     <Tooltip content="Duplicate render">
                       <button className="running-blender-action-button" type="button" onClick={() => openScheduleModal(run)} aria-label={`Duplicate ${formatRunName(run)}`}>
                         <Copy className="release-launch-icon" aria-hidden="true" strokeWidth={1.75} />
@@ -546,7 +597,7 @@ export function PlannerPage({
                         type="button"
                         onClick={() => onDeleteRun(run)}
                         aria-label={`Delete ${formatRunName(run)}`}
-                        disabled={run.status === "running"}
+                        disabled={run.status === "running" || run.pid !== null || isControlling}
                       >
                         <Trash2 className="release-launch-icon" aria-hidden="true" strokeWidth={1.75} />
                       </button>

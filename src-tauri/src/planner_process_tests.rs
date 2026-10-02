@@ -7,6 +7,7 @@ struct ObservedLifecycle {
     events: Vec<Vec<PlannerRunSummary>>,
     logs: Vec<PlannerLogEventPayload>,
     shutdown_calls: usize,
+    notifications: Vec<PlannerRunSummary>,
 }
 
 #[derive(Clone)]
@@ -36,7 +37,7 @@ impl PlannerHost for RecordingHost {
     fn save(&self, planner: &PlannerRegistry) -> Result<(), String> {
         save_if_dirty_with(planner, |runs| {
             save_planner_state_to_path(&self.state_file, runs)?;
-            self.observed.0.lock().unwrap().saved.push(runs.to_vec());
+            self.observed.0.lock().unwrap().saved.push(runs.runs.clone());
             self.observed.1.notify_all();
             Ok(())
         })
@@ -58,12 +59,105 @@ impl PlannerHost for RecordingHost {
         self.observed.1.notify_all();
         self.shutdown_error.clone().map_or(Ok(()), Err)
     }
+
+    fn finished(&self, run: PlannerRunSummary) {
+        self.observed.0.lock().unwrap().notifications.push(run);
+        self.observed.1.notify_all();
+    }
 }
 
 struct ProcessFixture {
     directory: PathBuf,
     planner: PlannerRegistry,
     host: RecordingHost,
+}
+
+#[test]
+fn user_cancellation_stops_the_real_process_preserves_cancelled_status_and_skips_shutdown() {
+    let fixture = ProcessFixture::new("wait");
+    fixture.planner.inner.lock().unwrap().runs[0].shutdown_when_done = true;
+    fixture.start();
+    fixture.host.wait_for(|observed| observed.logs.iter().any(|log| log.entry.message.starts_with("Fra:")));
+    let id = fixture.run_id();
+    let child = fixture.planner.inner.lock().unwrap().active_processes[&id].clone();
+    cancel_planner_run_with(&fixture.host, &fixture.planner, &id).unwrap();
+    fixture.host.wait_for(|observed| observed.events.iter().any(|runs| runs.iter().any(|run| run.id == id && run.status == PlannerRunStatus::Cancelled && run.pid.is_none())));
+    assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+    assert!(fixture.planner.inner.lock().unwrap().active_processes.is_empty());
+    assert_eq!(fixture.host.observed.0.lock().unwrap().shutdown_calls, 0);
+    assert!(fixture.host.observed.0.lock().unwrap().notifications.is_empty());
+    let loaded = load_planner_state_from_path(&fixture.host.state_file).unwrap();
+    assert_eq!(loaded.runs[0].status, PlannerRunStatus::Cancelled);
+    assert!(loaded.runs[0].logs.iter().any(|entry| entry.message == "Render cancelled by user."));
+}
+
+#[test]
+fn cancelling_pending_work_never_launches_blender_and_removes_it_from_queue() {
+    let fixture = ProcessFixture::new("success");
+    let id = fixture.run_id();
+    cancel_planner_run_with(&fixture.host, &fixture.planner, &id).unwrap();
+    fixture.start();
+    assert!(!fixture.directory.join("scene with spaces.args").exists());
+    assert!(get_planner_queue(&fixture.planner).unwrap().pending_run_ids.is_empty());
+    assert_eq!(load_planner_state_from_path(&fixture.host.state_file).unwrap().runs[0].status, PlannerRunStatus::Cancelled);
+    assert!(cancel_planner_run_with(&fixture.host, &fixture.planner, &id).is_err());
+    assert!(cancel_planner_run_with(&fixture.host, &fixture.planner, "missing").is_err());
+}
+
+#[test]
+fn paused_queue_blocks_launch_but_does_not_interrupt_active_render() {
+    let fixture = ProcessFixture::new("wait");
+    fixture.planner.inner.lock().unwrap().queue.paused = true;
+    fixture.start();
+    assert!(fixture.planner.inner.lock().unwrap().active_processes.is_empty());
+    assert!(!fixture.directory.join("scene with spaces.args").exists());
+    fixture.planner.inner.lock().unwrap().queue.paused = false;
+    fixture.start();
+    fixture.planner.inner.lock().unwrap().queue.paused = true;
+    assert_eq!(list_planner_runs(&fixture.planner).unwrap()[0].status, PlannerRunStatus::Running);
+    fs::write(fixture.directory.join("scene with spaces.release"), "continue").unwrap();
+    fixture.wait_for_exit(PlannerRunStatus::Completed);
+    fixture.host.wait_for(|observed| observed.notifications.len() == 1);
+    assert_eq!(fixture.host.observed.0.lock().unwrap().notifications[0].status, PlannerRunStatus::Completed);
+}
+
+#[test]
+fn failures_notify_once_for_nonzero_exit_and_missing_input() {
+    for mode in ["fail", "missing"] {
+        let fixture = ProcessFixture::new(mode);
+        if mode == "missing" {
+            fs::remove_file(fixture.directory.join("scene with spaces.blend")).unwrap();
+        }
+        fixture.start();
+        fixture.wait_for_exit(PlannerRunStatus::Failed);
+        fixture.host.wait_for(|observed| observed.notifications.len() == 1);
+        fixture.start();
+        assert_eq!(fixture.host.observed.0.lock().unwrap().notifications.len(), 1);
+        assert_eq!(fixture.host.observed.0.lock().unwrap().notifications[0].status, PlannerRunStatus::Failed);
+    }
+}
+
+#[test]
+fn launch_rechecks_queue_priority_and_schedule_after_scheduler_selection() {
+    let fixture = ProcessFixture::new("success");
+    let selected_id = fixture.run_id();
+    let mut other = fixture.planner.inner.lock().unwrap().runs[0].clone();
+    other.id = "new-priority".into();
+    {
+        let mut state = fixture.planner.inner.lock().unwrap();
+        state.runs.push(other);
+        reorder_queue_in_state(&mut state, vec!["new-priority".into(), selected_id.clone()]).unwrap();
+    }
+    fixture.start();
+    assert!(!fixture.directory.join("scene with spaces.args").exists());
+    assert_eq!(next_due_run_to_start(&fixture.planner).as_deref(), Some("new-priority"));
+    {
+        let mut state = fixture.planner.inner.lock().unwrap();
+        state.runs[1].start_at = current_timestamp() + 3600;
+        state.runs[0].start_at = current_timestamp() + 3600;
+    }
+    fixture.start();
+    assert!(!fixture.directory.join("scene with spaces.args").exists());
 }
 
 impl ProcessFixture {

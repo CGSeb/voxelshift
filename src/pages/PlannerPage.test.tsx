@@ -122,6 +122,40 @@ describe("PlannerPage", () => {
     document.body.style.overflow = "";
   });
 
+  it("moves pending jobs and offers cancel/retry only for supported statuses", () => {
+    const props = createDefaultProps();
+    const second = { ...pendingRun, id: "second", blendFilePath: "second.blend" };
+    const cancelled = { ...pendingRun, id: "cancelled", blendFilePath: "cancelled.blend", status: "cancelled" as const };
+    const onReorderQueue = vi.fn();
+    const onCancelRun = vi.fn();
+    const onRetryRun = vi.fn();
+    render(<PlannerPage {...props} plannerRuns={[runningRun, pendingRun, second, failedRun, cancelled, completedRun]} onReorderQueue={onReorderQueue} onCancelRun={onCancelRun} onRetryRun={onRetryRun} />);
+    expect(screen.getByRole("button", { name: "Move pending-scene.blend up" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move second.blend down" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Move second.blend up" }));
+    expect(onReorderQueue).toHaveBeenCalledWith([second.id, pendingRun.id]);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel running-scene.blend" }));
+    expect(onCancelRun).toHaveBeenCalledWith(runningRun);
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed-scene.blend" }));
+    expect(onRetryRun).toHaveBeenCalledWith(failedRun);
+    fireEvent.click(screen.getByRole("button", { name: "Retry cancelled.blend" }));
+    expect(onRetryRun).toHaveBeenCalledWith(cancelled);
+    expect(screen.queryByRole("button", { name: "Retry completed-scene.blend" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel failed-scene.blend" })).not.toBeInTheDocument();
+    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+  });
+
+  it("shows pause semantics and disables controls during a queue operation", () => {
+    const props = createDefaultProps();
+    const onToggleQueuePaused = vi.fn();
+    const { rerender } = render(<PlannerPage {...props} queuePaused onToggleQueuePaused={onToggleQueuePaused} />);
+    expect(screen.getByText(/The current render continues/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Resume queue" }));
+    expect(onToggleQueuePaused).toHaveBeenCalledOnce();
+    rerender(<PlannerPage {...props} isControlling onToggleQueuePaused={onToggleQueuePaused} />);
+    expect(screen.getByRole("button", { name: "Pause queue" })).toBeDisabled();
+  });
+
   it("shows error, loading, and empty planner states", () => {
     const props = createDefaultProps();
     const { rerender } = render(<PlannerPage {...props} errorMessage="Planner service offline" />);

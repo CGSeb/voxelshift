@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      statuses: read
 
     steps:
       - name: Checkout repository
@@ -46,6 +47,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test Coveralls status enforcement
+        run: node --test .github/scripts/wait-for-coveralls.test.cjs
+
       - name: Run frontend coverage
         run: npm run test:coverage
 
@@ -56,6 +60,10 @@ jobs:
       - name: Combine coverage reports
         run: |
           cat coverage/lcov.info coverage/rust.lcov > coverage/combined.lcov
+
+      - name: Record Coveralls upload start
+        id: coveralls-start
+        run: echo "timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2
@@ -70,3 +78,17 @@ jobs:
           name: coverage-report
           path: coverage
           if-no-files-found: error
+
+      - name: Require successful Coveralls result for this PR
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 11
+        uses: actions/github-script@v7
+        env:
+          COVERALLS_UPLOAD_STARTED_AT: ${{ steps.coveralls-start.outputs.timestamp }}
+        with:
+          script: |
+            const waitForCoveralls = require('./.github/scripts/wait-for-coveralls.cjs');
+            await waitForCoveralls({
+              github, context, core,
+              startedAt: process.env.COVERALLS_UPLOAD_STARTED_AT,
+            });

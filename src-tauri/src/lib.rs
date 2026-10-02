@@ -486,6 +486,7 @@ pub fn run() {
         .manage(RunningBlenderRegistry::default())
         .manage(planner::PlannerRegistry::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if let Err(error) = mcp::initialize(app.handle()) {
                 eprintln!("Unable to initialize MCP server: {error}");
@@ -550,6 +551,11 @@ pub fn run() {
             get_running_blender_logs,
             stop_running_blender,
             get_planner_runs,
+            get_planner_queue,
+            set_planner_queue_paused,
+            reorder_planner_queue,
+            cancel_planner_run,
+            retry_planner_run,
             get_planner_logs,
             delete_planner_run,
             update_planner_run,
@@ -620,6 +626,49 @@ fn get_planner_runs(
     planner: tauri::State<'_, planner::PlannerRegistry>,
 ) -> Result<Vec<planner::PlannerRunSummary>, String> {
     planner::get_planner_runs(planner)
+}
+
+#[tauri::command]
+fn get_planner_queue(
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+) -> Result<planner::PlannerQueueState, String> {
+    planner::get_planner_queue(planner.inner())
+}
+
+#[tauri::command]
+fn set_planner_queue_paused(
+    app: AppHandle,
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+    paused: bool,
+) -> Result<planner::PlannerQueueState, String> {
+    planner::set_planner_queue_paused(&app, planner.inner(), paused)
+}
+
+#[tauri::command]
+fn reorder_planner_queue(
+    app: AppHandle,
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+    run_ids: Vec<String>,
+) -> Result<planner::PlannerQueueState, String> {
+    planner::reorder_planner_queue(&app, planner.inner(), run_ids)
+}
+
+#[tauri::command]
+fn cancel_planner_run(
+    app: AppHandle,
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+    run_id: String,
+) -> Result<(), String> {
+    planner::cancel_planner_run(&app, planner.inner(), run_id)
+}
+
+#[tauri::command]
+fn retry_planner_run(
+    app: AppHandle,
+    planner: tauri::State<'_, planner::PlannerRegistry>,
+    run_id: String,
+) -> Result<planner::PlannerRunSummary, String> {
+    planner::retry_planner_run(&app, planner.inner(), run_id)
 }
 
 #[tauri::command]

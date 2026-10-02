@@ -10,6 +10,7 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_"],
   test: {
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     coverage: {
